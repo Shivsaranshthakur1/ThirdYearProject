@@ -75,6 +75,7 @@ classdef centralController_RRT < handle
         end
         
         function initializeRRTPlanner(obj)
+            rng(12345);  % Fixed seed for debugging
             fprintf('Creating SE3 state space...\n');
             ss = stateSpaceSE3;
             
@@ -512,184 +513,166 @@ classdef centralController_RRT < handle
         end
 
         function checkSurvivorDetection(obj)
-            DETECTION_RADIUS = 70;
-            DETECTION_HEIGHT = 10.0;
-            HEIGHT_TOLERANCE = 5.0;
-            
-            if ~isempty(obj.vehicleAssignments) && obj.vehicleAssignments.Count > 0
-                assignmentKeys = obj.vehicleAssignments.keys;
+    % Define detection parameters
+    DETECTION_RADIUS = 70;
+    DETECTION_HEIGHT = 10.0;
+    HEIGHT_TOLERANCE = 5.0;
+    
+    %%% Improvement 3: Hysteresis Implementation
+    % Create a persistent counter map so that detection conditions must be met
+    % for 2 consecutive cycles before a survivor is marked as detected.
+    persistent detectionCounter;
+    if isempty(detectionCounter)
+        detectionCounter = containers.Map('KeyType', 'char', 'ValueType', 'double');
+    end
+    
+    if ~isempty(obj.vehicleAssignments) && obj.vehicleAssignments.Count > 0
+        assignmentKeys = obj.vehicleAssignments.keys;
+        
+        for k = 1:length(assignmentKeys)
+            try
+                vehicleID = char(assignmentKeys{k});
+                survivorID = obj.vehicleAssignments(vehicleID);
+                survivor = obj.findSurvivorByID(survivorID);
                 
-                for k = 1:length(assignmentKeys)
-                    try
-                        vehicleID = char(assignmentKeys{k});
-                        survivorID = obj.vehicleAssignments(vehicleID);
-                        survivor = obj.findSurvivorByID(survivorID);
+                if ~isempty(survivor)
+                    fprintf('\n=== Processing Vehicle %s ===\n', vehicleID);
+                    fprintf('Target Survivor %d - Current Status: %s\n', survivorID, survivor.Status);
+                    
+                    if contains(vehicleID, 'UAV')
+                        % UAV detection logic
+                        idx = str2double(vehicleID(4:end));
+                        platform = obj.aerialPlatforms{idx};
+                        currentMotion = platform.read();
+                        vehiclePos = currentMotion(1:3);
                         
-                        if ~isempty(survivor)
-                            fprintf('\n=== Processing Vehicle %s ===\n', vehicleID);
-                            fprintf('Target Survivor %d - Current Status: %s\n', survivorID, survivor.Status);
-                            
-                            if contains(vehicleID, 'UAV')
-                                idx = str2double(vehicleID(4:end));
-                                platform = obj.aerialPlatforms{idx};
-                                currentMotion = platform.read();
-                                vehiclePos = currentMotion(1:3);
-                                
-                                horizontalDist = norm(survivor.Position(1:2) - vehiclePos(1:2));
-                                targetHeight = survivor.Position(3) + DETECTION_HEIGHT;
-                                currentHeight = vehiclePos(3);
-        
-                                %%% NEW DEBUG CODE %%%
-                                dx = survivor.Position(1) - vehiclePos(1);
-                                dy = survivor.Position(2) - vehiclePos(2);
-                                fprintf('DEBUG: dx=%.2f, dy=%.2f => horizontalDist=%.2f\n', ...
-                                        dx, dy, horizontalDist);
-        
-                                if norm(currentMotion(4:6)) < 0.1
-                                    fprintf('\nUAV%d Hover Analysis:\n', idx);
-                                    fprintf('- Current position: [%.2f, %.2f, %.2f]\n', ...
-                                        vehiclePos(1), vehiclePos(2), vehiclePos(3));
-                                    fprintf('- Current velocity: [%.2f, %.2f, %.2f]\n', ...
-                                        currentMotion(4), currentMotion(5), currentMotion(6));
-                                    fprintf('- Path empty? %d\n', isempty(obj.vehiclePaths{idx}));
-                                    fprintf('- Distance to target: %.2f\n', horizontalDist);
-                                    fprintf('- Height difference from target: %.2f\n', ...
-                                        abs(currentHeight - targetHeight));
-                                end
-        
-                                fprintf('Height Analysis:\n');
-                                fprintf('  Current: %.2f, Target: %.2f, Cruise: %.2f\n', ...
-                                    currentHeight, targetHeight, obj.CRUISE_HEIGHT);
-        
-                                % Existing debug lines
-                                fprintf('Survivor XY: [%.2f, %.2f], Vehicle XY: [%.2f, %.2f]\n',...
-                                    survivor.Position(1), survivor.Position(2), ...
-                                    vehiclePos(1), vehiclePos(2));
-                                fprintf('Horizontal Distance: %.2f\n', horizontalDist);
-                                
-                                % Add more detailed proximity checking
-                              fprintf(['Proximity check: horizontalDist=%.2f (threshold=%.2f), ' ...
-         'height diff=%.2f (threshold=%.2f)\n'], ...
-         horizontalDist, DETECTION_RADIUS, abs(currentHeight - targetHeight), HEIGHT_TOLERANCE);
-                                
-                                % Check detection conditions
-                                if horizontalDist < DETECTION_RADIUS && ...
-                                   abs(currentHeight - targetHeight) < HEIGHT_TOLERANCE
-                                    
-                                    fprintf('Detection conditions met!\n');
-                                    fprintf('State transition: %s -> DETECTED\n', survivor.Status);
-                                    survivor.Status = 'DETECTED';
-                                    survivor.Visited = true;
-                                    
-                                    % FIX: Add robust error handling for map removals
-                                    if obj.vehicleAssignments.isKey(vehicleID)
-                                        obj.vehicleAssignments.remove(vehicleID);
-                                    end
-                                    
-                                    if isfield(obj, 'vehicleInDescent') && obj.vehicleInDescent.isKey(vehicleID)
-                                        obj.vehicleInDescent.remove(vehicleID);
-                                    end
-                                    
-                                    returnMotion = zeros(1, 16);
-                                    returnMotion(1:3) = vehiclePos;
-                                    returnMotion(3) = obj.CRUISE_HEIGHT;
-                                    returnMotion(4:6) = [0, 0, 2.0];
-                                    returnMotion(10:13) = currentMotion(10:13);
-                                    
-                                    move(platform, returnMotion);
-                                    
-                                    [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
-                                    fprintf('New assignments made: %d\n', assignmentsMade);
-                                end
-                                                                        
+                        horizontalDist = norm(survivor.Position(1:2) - vehiclePos(1:2));
+                        targetHeight = survivor.Position(3) + DETECTION_HEIGHT;
+                        currentHeight = vehiclePos(3);
+                        
+                        fprintf('Horizontal Distance: %.2f\n', horizontalDist);
+                        fprintf('Height Analysis: Current = %.2f, Target = %.2f\n', currentHeight, targetHeight);
+                        
+                        % Check detection conditions
+                        if horizontalDist < DETECTION_RADIUS && abs(currentHeight - targetHeight) < HEIGHT_TOLERANCE
+                            key = vehicleID;
+                            if detectionCounter.isKey(key)
+                                detectionCounter(key) = detectionCounter(key) + 1;
                             else
-                                % Ground vehicle logic
-                                idx = str2double(vehicleID(7:end));
-                                platform = obj.groundPlatforms{idx};
-                                currentMotion = platform.read();
-                                vehiclePos = currentMotion(1:3);
+                                detectionCounter(key) = 1;
+                            end
+                            % Only trigger detection if conditions hold for 2 consecutive cycles
+                            if detectionCounter(key) >= 2
+                                fprintf('Detection conditions met consistently!\n');
+                                fprintf('State transition: %s -> DETECTED\n', survivor.Status);
+                                survivor.Status = 'DETECTED';
+                                survivor.Visited = true;
                                 
-                                distToSurvivor = norm(survivor.Position(1:2) - vehiclePos(1:2));
-                                fprintf('Ground%d Analysis:\n', idx);
-                                fprintf('  Distance to survivor: %.2f\n', distToSurvivor);
+                                if obj.vehicleAssignments.isKey(vehicleID)
+                                    obj.vehicleAssignments.remove(vehicleID);
+                                end
+                                if isfield(obj, 'vehicleInDescent') && obj.vehicleInDescent.isKey(vehicleID)
+                                    obj.vehicleInDescent.remove(vehicleID);
+                                end
                                 
-                                if distToSurvivor < DETECTION_RADIUS
-                                    fprintf('Ground detection conditions met!\n');
-                                    fprintf('State transition: %s -> DETECTED\n', survivor.Status);
-                                    survivor.Status = 'DETECTED';
-                                    survivor.Visited = true;
-                                    
-                                    % FIX: Add robust error handling for map removals
-                                    if obj.vehicleAssignments.isKey(vehicleID)
-                                        obj.vehicleAssignments.remove(vehicleID);
-                                    end
-                                    
-                                    [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
-                                    if assignmentsMade > 0 && obj.vehicleAssignments.isKey(vehicleID)
-                                        newSurvivorID = obj.vehicleAssignments(vehicleID);
-                                        newSurvivor = obj.findSurvivorByID(newSurvivorID);
-                                        if ~isempty(newSurvivor)
-                                            [success, newPath] = obj.planPath(vehiclePos, newSurvivor.Position, false);
-                                            if success
-                                                obj.vehiclePaths{obj.numAerialVehicles + idx} = newPath;
-                                                fprintf('New path planned to survivor %d\n', newSurvivorID);
-                                            end
-                                        end
+                                % Command the UAV to return to cruise height
+                                returnMotion = zeros(1, 16);
+                                returnMotion(1:3) = vehiclePos;
+                                returnMotion(3) = obj.CRUISE_HEIGHT;
+                                returnMotion(4:6) = [0, 0, 2.0];
+                                returnMotion(10:13) = currentMotion(10:13);
+                                move(platform, returnMotion);
+                                
+                                [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
+                                fprintf('New assignments made: %d\n', assignmentsMade);
+                            end
+                        else
+                            % Reset counter if condition fails
+                            if detectionCounter.isKey(vehicleID)
+                                detectionCounter(vehicleID) = 0;
+                            end
+                        end
+                        
+                    else
+                        % Ground vehicle detection logic (unchanged)
+                        idx = str2double(vehicleID(7:end));
+                        platform = obj.groundPlatforms{idx};
+                        currentMotion = platform.read();
+                        vehiclePos = currentMotion(1:3);
+                        
+                        distToSurvivor = norm(survivor.Position(1:2) - vehiclePos(1:2));
+                        fprintf('Ground%d Analysis: Distance to survivor = %.2f\n', idx, distToSurvivor);
+                        
+                        if distToSurvivor < DETECTION_RADIUS
+                            fprintf('Ground detection conditions met!\n');
+                            fprintf('State transition: %s -> DETECTED\n', survivor.Status);
+                            survivor.Status = 'DETECTED';
+                            survivor.Visited = true;
+                            
+                            if obj.vehicleAssignments.isKey(vehicleID)
+                                obj.vehicleAssignments.remove(vehicleID);
+                            end
+                            
+                            [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
+                            if assignmentsMade > 0 && obj.vehicleAssignments.isKey(vehicleID)
+                                newSurvivorID = obj.vehicleAssignments(vehicleID);
+                                newSurvivor = obj.findSurvivorByID(newSurvivorID);
+                                if ~isempty(newSurvivor)
+                                    [success, newPath] = obj.planPath(vehiclePos, newSurvivor.Position, false);
+                                    if success
+                                        obj.vehiclePaths{obj.numAerialVehicles + idx} = newPath;
+                                        fprintf('New path planned to survivor %d\n', newSurvivorID);
                                     end
                                 end
                             end
                         end
-                        
-                    catch e
-                        fprintf('Error in detection: %s\n', getReport(e));
                     end
                 end
                 
-                props = properties(obj.survivorManager);
-                fprintf('\nSurvivor Manager Properties:\n');
-                for i = 1:length(props)
-                    fprintf('  %s\n', props{i});
-                end
+            catch e
+                fprintf('Error in detection: %s\n', getReport(e));
             end
-        
-            % Force path regeneration if needed
-            for i = 1:obj.numAerialVehicles
-                vehicleID = sprintf('UAV%d', i);
-                if isempty(obj.vehiclePaths{i}) && obj.vehicleAssignments.isKey(vehicleID)
-                    fprintf('Forcing path regeneration for UAV%d\n', i);
-                    currentPos = obj.aerialPlatforms{i}.read();
-                    survivorID = obj.vehicleAssignments(vehicleID);
-                    survivor = obj.findSurvivorByID(survivorID);
-                    if ~isempty(survivor)
-                        targetPos = survivor.Position;
-                        [success, newPath] = obj.planPath(currentPos(1:3), targetPos, true);
-                        if success
-                            obj.vehiclePaths{i} = newPath;
-                            fprintf('New path generated for UAV%d with %d waypoints\n', i, size(newPath,1));
-                        end
-                    end
-                end
-            end
-            
-            for i = 1:obj.numGroundVehicles
-                idx = obj.numAerialVehicles + i;
-                if isempty(obj.vehiclePaths{idx}) && obj.vehicleAssignments.isKey(sprintf('Ground%d', i))
-                    fprintf('Forcing path regeneration for Ground%d\n', i);
-                    currentPos = obj.groundPlatforms{i}.read();
-                    survivorID = obj.vehicleAssignments(sprintf('Ground%d', i));
-                    survivor = obj.findSurvivorByID(survivorID);
-                    if ~isempty(survivor)
-                        targetPos = survivor.Position;
-                        targetPos(3) = 0; 
-                        [success, newPath] = obj.planPath(currentPos(1:3), targetPos, false);
-                        if success
-                            obj.vehiclePaths{idx} = newPath;
-                            fprintf('New path generated for Ground%d with %d waypoints\n', i, size(newPath,1));
-                        end
-                    end
+        end
+    end
+    
+    % Optional: Force path regeneration if necessary (existing code below)
+    for i = 1:obj.numAerialVehicles
+        vehicleID = sprintf('UAV%d', i);
+        if isempty(obj.vehiclePaths{i}) && obj.vehicleAssignments.isKey(vehicleID)
+            fprintf('Forcing path regeneration for UAV%d\n', i);
+            currentPos = obj.aerialPlatforms{i}.read();
+            survivorID = obj.vehicleAssignments(vehicleID);
+            survivor = obj.findSurvivorByID(survivorID);
+            if ~isempty(survivor)
+                targetPos = survivor.Position;
+                [success, newPath] = obj.planPath(currentPos(1:3), targetPos, true);
+                if success
+                    obj.vehiclePaths{i} = newPath;
+                    fprintf('New path generated for UAV%d with %d waypoints\n', i, size(newPath, 1));
                 end
             end
         end
+    end
+    
+    for i = 1:obj.numGroundVehicles
+        idx = obj.numAerialVehicles + i;
+        if isempty(obj.vehiclePaths{idx}) && obj.vehicleAssignments.isKey(sprintf('Ground%d', i))
+            fprintf('Forcing path regeneration for Ground%d\n', i);
+            currentPos = obj.groundPlatforms{i}.read();
+            survivorID = obj.vehicleAssignments(sprintf('Ground%d', i));
+            survivor = obj.findSurvivorByID(survivorID);
+            if ~isempty(survivor)
+                targetPos = survivor.Position;
+                targetPos(3) = 0; 
+                [success, newPath] = obj.planPath(currentPos(1:3), targetPos, false);
+                if success
+                    obj.vehiclePaths{idx} = newPath;
+                    fprintf('New path generated for Ground%d with %d waypoints\n', i, size(newPath,1));
+                end
+            end
+        end
+    end
+end
 
         function survivor = findSurvivorByID(obj, survivorID)
             survivor = [];
@@ -966,89 +949,194 @@ classdef centralController_RRT < handle
         end
         
         function path = followPathSegment(obj, platform, path, isAerial)
-    fprintf('\n=== Path Following Analysis ===\n');
-    
-    if isempty(path) || size(path, 1) < 2
-        fprintf('Path requires regeneration (length=%d)\n', size(path, 1));
-        path = [];
-        return;
-    end
-    
-    currentMotion = platform.read();
-    currentPos = currentMotion(1:3);
-    
-    fprintf('1. Current State:\n');
-    fprintf('  Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
-    
-    nextWaypoint = path(1, 1:3);
-    if ~isAerial
-        nextWaypoint(3) = 0;
-    end
-    
-    % Calculate Euclidean distance
-    if isAerial
-        distance = norm(nextWaypoint - currentPos);
-    else
-        distance = norm(nextWaypoint(1:2) - currentPos(1:2));
-    end
-    
-    % FIX: Add more precision to distance checking and verification
-    fprintf('2. Distance Analysis:\n');
-    fprintf('  To waypoint: %.6f\n', distance);
-    fprintf('  Distance components: dx=%.6f, dy=%.6f, dz=%.6f\n', ...
-           nextWaypoint(1)-currentPos(1), ...
-           nextWaypoint(2)-currentPos(2), ...
-           nextWaypoint(3)-currentPos(3));
-    fprintf('  Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
-    
-    % FIX: Add failsafe - if we're in exactly the same position for multiple cycles
-    persistent lastPosition;
-    persistent stuckCount;
-    persistent stuckPathLength;
-    
-    if isempty(lastPosition)
-        lastPosition = currentPos;
-        stuckCount = 0;
-        stuckPathLength = size(path, 1);
-    end
-    
-    % Check if we haven't moved or if the path isn't changing
-    if norm(currentPos - lastPosition) < 1e-6 || stuckPathLength == size(path, 1)
-        stuckCount = stuckCount + 1;
-        fprintf('3. Movement check: Vehicle has not moved for %d cycles\n', stuckCount);
-        
-        % If stuck for too many cycles, force movement toward final goal
-        if stuckCount > 5
-            fprintf('   Forcing movement after being stuck for %d cycles\n', stuckCount);
+            fprintf('\n=== Path Following Analysis ===\n');
             
-            % IMPROVED: Use the final waypoint in the path instead of just the next one
-            finalGoal = path(end, 1:3);
-            fprintf('   Targeting final waypoint: [%.2f, %.2f, %.2f]\n', finalGoal(1), finalGoal(2), finalGoal(3));
-            
-            % Force movement toward the final goal instead of the immediate next waypoint
-            direction = (finalGoal - currentPos);
-            
-            dirMag = norm(direction);
-            if dirMag > 1e-6
-                direction = direction / dirMag;
-                fprintf('   Moving directly toward final goal\n');
-            else
-                % Only as a last resort, use random direction
-                direction = [randn(1), randn(1), 0];
-                direction = direction / norm(direction);
-                fprintf('   Direction too small, using random direction\n');
+            if isempty(path) || size(path, 1) < 2
+                fprintf('Path requires regeneration (length=%d)\n', size(path, 1));
+                path = [];
+                return;
             end
             
-            % Set a reasonable speed
+            currentMotion = platform.read();
+            currentPos = currentMotion(1:3);
+            
+            fprintf('1. Current State:\n');
+            fprintf('  Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
+            
+            nextWaypoint = path(1, 1:3);
+            if ~isAerial
+                nextWaypoint(3) = 0;
+            end
+            
+            % Calculate Euclidean distance
+            if isAerial
+                distance = norm(nextWaypoint - currentPos);
+            else
+                distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+            end
+            
+            % FIX: Add more precision to distance checking and verification
+            fprintf('2. Distance Analysis:\n');
+            fprintf('  To waypoint: %.6f\n', distance);
+            fprintf('  Distance components: dx=%.6f, dy=%.6f, dz=%.6f\n', ...
+                   nextWaypoint(1)-currentPos(1), ...
+                   nextWaypoint(2)-currentPos(2), ...
+                   nextWaypoint(3)-currentPos(3));
+            fprintf('  Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
+            
+            % FIX: Add failsafe - if we're in exactly the same position for multiple cycles
+            persistent lastPosition;
+            persistent stuckCount;
+            if isempty(lastPosition)
+                lastPosition = currentPos;
+                stuckCount = 0;
+            end
+            
+            % Check if we haven't moved
+            if norm(currentPos - lastPosition) < 1e-6
+                stuckCount = stuckCount + 1;
+                fprintf('3. Movement check: Vehicle has not moved for %d cycles\n', stuckCount);
+                
+                % If stuck for too many cycles, force movement regardless of distance
+                if stuckCount > 5
+                    fprintf('   Forcing movement after being stuck for %d cycles\n', stuckCount);
+                    
+                    % Force movement toward next waypoint, ignoring distance check
+                    direction = (nextWaypoint - currentPos);
+                    
+                    % Normalize only if magnitude isn't near zero
+                    dirMag = norm(direction);
+                    if dirMag > 1e-6
+                        direction = direction / dirMag;
+                    else
+                        % If somehow the vectors are very close but not exactly equal
+                        % Create a small random offset to break the deadlock
+                        direction = [randn(1), randn(1), 0];
+                        direction = direction / norm(direction);
+                        fprintf('   Direction too small, using random direction\n');
+                    end
+                    
+                    % Set a reasonable speed
+                    if isAerial
+                        speed = obj.AERIAL_SPEED;
+                    else
+                        speed = obj.GROUND_SPEED;
+                    end
+                    
+                    velocity = direction * speed;
+                    newMotion = zeros(1, 16);
+                    newPos = currentPos + velocity * obj.SIMULATION_STEP;
+                    
+                    newMotion(1:3) = newPos;
+                    newMotion(4:6) = velocity;
+                    newMotion(10:13) = currentMotion(10:13);
+                    
+                    if ~isAerial
+                        newMotion(3) = 0;
+                        newMotion(6) = 0;
+                    end
+                    
+                    fprintf('   Forced movement: [%.6f, %.6f, %.6f] -> [%.6f, %.6f, %.6f]\n', ...
+                           currentPos(1), currentPos(2), currentPos(3), ...
+                           newPos(1), newPos(2), newPos(3));
+                           
+                    try
+                        move(platform, newMotion);
+                        lastPosition = newPos;  % Update last position
+                        return;  % Keep the path as is, don't remove waypoints
+                    catch e
+                        fprintf('Error in forced movement: %s\n', e.message);
+                        stuckCount = 0;  % Reset stuck counter on error
+                        path = [];
+                        return;
+                    end
+                end
+            else
+                % If we've moved, reset the stuck counter
+                stuckCount = 0;
+                lastPosition = currentPos;
+            end
+            
+            % FIX: More robust waypoint reached check - ensure we're actually close enough
+            if distance < obj.REPLAN_DISTANCE && distance > 1e-6
+                path(1,:) = [];
+                fprintf('3. Waypoint reached, %d remaining\n', size(path,1));
+                
+                % FIX: Make sure we actually have enough waypoints left
+                if size(path, 1) < 2
+                    fprintf('Path too short after waypoint removal (only %d points left)\n', size(path,1));
+                    path = [];
+                    return;
+                end
+                
+                nextWaypoint = path(1, 1:3);
+                if ~isAerial
+                    nextWaypoint(3) = 0;
+                end
+                
+                % Recalculate distance to next waypoint
+                if isAerial
+                    distance = norm(nextWaypoint - currentPos);
+                else
+                    distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+                end
+                
+                fprintf('  New distance to next waypoint: %.6f\n', distance);
+            elseif distance < 1e-6
+                % FIX: If distance is essentially zero but positions aren't actually equal
+                % This indicates a numerical precision issue
+                fprintf('3. Distance is zero but position mismatch exists\n');
+                fprintf('  Current: [%.6f, %.6f, %.6f], Waypoint: [%.6f, %.6f, %.6f]\n', ...
+                       currentPos(1), currentPos(2), currentPos(3), ...
+                       nextWaypoint(1), nextWaypoint(2), nextWaypoint(3));
+                
+                % Skip this waypoint as it's causing problems
+                path(1,:) = [];
+                fprintf('  Skipping problematic waypoint, %d remaining\n', size(path,1));
+                
+                if size(path, 1) < 2
+                    fprintf('Path too short after skipping waypoint\n');
+                    path = [];
+                    return;
+                end
+                
+                nextWaypoint = path(1, 1:3);
+                if ~isAerial
+                    nextWaypoint(3) = 0;
+                end
+                
+                if isAerial
+                    distance = norm(nextWaypoint - currentPos);
+                else
+                    distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+                end
+            end
+            
+            if distance < 1e-6
+                fprintf('Distance too small for movement calculation\n');
+                return;
+            end
+            
+            direction = (nextWaypoint - currentPos) / distance;
             if isAerial
                 speed = obj.AERIAL_SPEED;
             else
                 speed = obj.GROUND_SPEED;
             end
             
+            if any(isnan(direction)) || any(isinf(direction))
+                fprintf('Warning: Invalid direction vector\n');
+                return;
+            end
+            
             velocity = direction * speed;
             newMotion = zeros(1, 16);
             newPos = currentPos + velocity * obj.SIMULATION_STEP;
+            
+            if any(isnan(newPos)) || any(isinf(newPos))
+                fprintf('Warning: Invalid new position calculated\n');
+                return;
+            end
             
             newMotion(1:3) = newPos;
             newMotion(4:6) = velocity;
@@ -1059,150 +1147,28 @@ classdef centralController_RRT < handle
                 newMotion(6) = 0;
             end
             
-            fprintf('   Forced movement: [%.6f, %.6f, %.6f] -> [%.6f, %.6f, %.6f]\n', ...
-                   currentPos(1), currentPos(2), currentPos(3), ...
-                   newPos(1), newPos(2), newPos(3));
-                   
-            try
-                move(platform, newMotion);
-                lastPosition = newPos;  % Update last position
-                stuckPathLength = size(path, 1);  % Record current path length
-                
-                % IMPORTANT: If we're stuck on the same waypoint, skip it
-                if distance < 0.1
-                    fprintf('   Skipping current waypoint to break stuck condition\n');
-                    if size(path, 1) > 1
-                        path(1,:) = [];
-                    end
-                end
-                
-                return;  % Keep the path as is, don't remove waypoints
-            catch e
-                fprintf('Error in forced movement: %s\n', e.message);
-                stuckCount = 0;  % Reset stuck counter on error
-                path = [];
+            if any(isnan(newMotion)) || any(isinf(newMotion))
+                fprintf('Warning: Invalid motion vector\n');
                 return;
             end
+            
+            try
+                move(platform, newMotion);
+                
+                newPos = platform.read();
+                actualMovement = norm(newPos(1:3) - currentPos);
+                
+                fprintf('5. Movement:\n');
+                fprintf('  Planned: %.6f\n', norm(velocity * obj.SIMULATION_STEP));
+                fprintf('  Actual: %.6f\n', actualMovement);
+                
+                if actualMovement < 1e-6
+                    fprintf('Warning: Movement smaller than expected, potential stuckness\n');
+                end
+            catch e
+                fprintf('Error in movement execution: %s\n', e.message);
+            end
         end
-    else
-        % If we've moved, reset the stuck counter
-        stuckCount = 0;
-        lastPosition = currentPos;
-        stuckPathLength = size(path, 1);
-    end
-    
-    % FIX: More robust waypoint reached check - ensure we're actually close enough
-    if distance < obj.REPLAN_DISTANCE && distance > 1e-6
-        path(1,:) = [];
-        fprintf('3. Waypoint reached, %d remaining\n', size(path,1));
-        
-        % FIX: Make sure we actually have enough waypoints left
-        if size(path, 1) < 2
-            fprintf('Path too short after waypoint removal (only %d points left)\n', size(path,1));
-            path = [];
-            return;
-        end
-        
-        nextWaypoint = path(1, 1:3);
-        if ~isAerial
-            nextWaypoint(3) = 0;
-        end
-        
-        % Recalculate distance to next waypoint
-        if isAerial
-            distance = norm(nextWaypoint - currentPos);
-        else
-            distance = norm(nextWaypoint(1:2) - currentPos(1:2));
-        end
-        
-        fprintf('  New distance to next waypoint: %.6f\n', distance);
-    elseif distance < 1e-6
-        % FIX: If distance is essentially zero but positions aren't actually equal
-        % This indicates a numerical precision issue
-        fprintf('3. Distance is zero but position mismatch exists\n');
-        fprintf('  Current: [%.6f, %.6f, %.6f], Waypoint: [%.6f, %.6f, %.6f]\n', ...
-               currentPos(1), currentPos(2), currentPos(3), ...
-               nextWaypoint(1), nextWaypoint(2), nextWaypoint(3));
-        
-        % Skip this waypoint as it's causing problems
-        path(1,:) = [];
-        fprintf('  Skipping problematic waypoint, %d remaining\n', size(path,1));
-        
-        if size(path, 1) < 2
-            fprintf('Path too short after skipping waypoint\n');
-            path = [];
-            return;
-        end
-        
-        nextWaypoint = path(1, 1:3);
-        if ~isAerial
-            nextWaypoint(3) = 0;
-        end
-        
-        if isAerial
-            distance = norm(nextWaypoint - currentPos);
-        else
-            distance = norm(nextWaypoint(1:2) - currentPos(1:2));
-        end
-    end
-    
-    if distance < 1e-6
-        fprintf('Distance too small for movement calculation\n');
-        return;
-    end
-    
-    direction = (nextWaypoint - currentPos) / distance;
-    if isAerial
-        speed = obj.AERIAL_SPEED;
-    else
-        speed = obj.GROUND_SPEED;
-    end
-    
-    if any(isnan(direction)) || any(isinf(direction))
-        fprintf('Warning: Invalid direction vector\n');
-        return;
-    end
-    
-    velocity = direction * speed;
-    newMotion = zeros(1, 16);
-    newPos = currentPos + velocity * obj.SIMULATION_STEP;
-    
-    if any(isnan(newPos)) || any(isinf(newPos))
-        fprintf('Warning: Invalid new position calculated\n');
-        return;
-    end
-    
-    newMotion(1:3) = newPos;
-    newMotion(4:6) = velocity;
-    newMotion(10:13) = currentMotion(10:13);
-    
-    if ~isAerial
-        newMotion(3) = 0;
-        newMotion(6) = 0;
-    end
-    
-    if any(isnan(newMotion)) || any(isinf(newMotion))
-        fprintf('Warning: Invalid motion vector\n');
-        return;
-    end
-    
-    try
-        move(platform, newMotion);
-        
-        newPos = platform.read();
-        actualMovement = norm(newPos(1:3) - currentPos);
-        
-        fprintf('5. Movement:\n');
-        fprintf('  Planned: %.6f\n', norm(velocity * obj.SIMULATION_STEP));
-        fprintf('  Actual: %.6f\n', actualMovement);
-        
-        if actualMovement < 1e-6
-            fprintf('Warning: Movement smaller than expected, potential stuckness\n');
-        end
-    catch e
-        fprintf('Error in movement execution: %s\n', e.message);
-    end
-end
         function needsReplan = needsReplanning(obj, currentPos, path)
             if isempty(path)
                 needsReplan = true;
