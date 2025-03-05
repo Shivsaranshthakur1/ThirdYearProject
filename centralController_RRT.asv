@@ -966,194 +966,89 @@ classdef centralController_RRT < handle
         end
         
         function path = followPathSegment(obj, platform, path, isAerial)
-            fprintf('\n=== Path Following Analysis ===\n');
+    fprintf('\n=== Path Following Analysis ===\n');
+    
+    if isempty(path) || size(path, 1) < 2
+        fprintf('Path requires regeneration (length=%d)\n', size(path, 1));
+        path = [];
+        return;
+    end
+    
+    currentMotion = platform.read();
+    currentPos = currentMotion(1:3);
+    
+    fprintf('1. Current State:\n');
+    fprintf('  Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
+    
+    nextWaypoint = path(1, 1:3);
+    if ~isAerial
+        nextWaypoint(3) = 0;
+    end
+    
+    % Calculate Euclidean distance
+    if isAerial
+        distance = norm(nextWaypoint - currentPos);
+    else
+        distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+    end
+    
+    % FIX: Add more precision to distance checking and verification
+    fprintf('2. Distance Analysis:\n');
+    fprintf('  To waypoint: %.6f\n', distance);
+    fprintf('  Distance components: dx=%.6f, dy=%.6f, dz=%.6f\n', ...
+           nextWaypoint(1)-currentPos(1), ...
+           nextWaypoint(2)-currentPos(2), ...
+           nextWaypoint(3)-currentPos(3));
+    fprintf('  Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
+    
+    % FIX: Add failsafe - if we're in exactly the same position for multiple cycles
+    persistent lastPosition;
+    persistent stuckCount;
+    persistent stuckPathLength;
+    
+    if isempty(lastPosition)
+        lastPosition = currentPos;
+        stuckCount = 0;
+        stuckPathLength = size(path, 1);
+    end
+    
+    % Check if we haven't moved or if the path isn't changing
+    if norm(currentPos - lastPosition) < 1e-6 || stuckPathLength == size(path, 1)
+        stuckCount = stuckCount + 1;
+        fprintf('3. Movement check: Vehicle has not moved for %d cycles\n', stuckCount);
+        
+        % If stuck for too many cycles, force movement toward final goal
+        if stuckCount > 5
+            fprintf('   Forcing movement after being stuck for %d cycles\n', stuckCount);
             
-            if isempty(path) || size(path, 1) < 2
-                fprintf('Path requires regeneration (length=%d)\n', size(path, 1));
-                path = [];
-                return;
-            end
+            % IMPROVED: Use the final waypoint in the path instead of just the next one
+            finalGoal = path(end, 1:3);
+            fprintf('   Targeting final waypoint: [%.2f, %.2f, %.2f]\n', finalGoal(1), finalGoal(2), finalGoal(3));
             
-            currentMotion = platform.read();
-            currentPos = currentMotion(1:3);
+            % Force movement toward the final goal instead of the immediate next waypoint
+            direction = (finalGoal - currentPos);
             
-            fprintf('1. Current State:\n');
-            fprintf('  Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
-            
-            nextWaypoint = path(1, 1:3);
-            if ~isAerial
-                nextWaypoint(3) = 0;
-            end
-            
-            % Calculate Euclidean distance
-            if isAerial
-                distance = norm(nextWaypoint - currentPos);
+            dirMag = norm(direction);
+            if dirMag > 1e-6
+                direction = direction / dirMag;
+                fprintf('   Moving directly toward final goal\n');
             else
-                distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+                % Only as a last resort, use random direction
+                direction = [randn(1), randn(1), 0];
+                direction = direction / norm(direction);
+                fprintf('   Direction too small, using random direction\n');
             end
             
-            % FIX: Add more precision to distance checking and verification
-            fprintf('2. Distance Analysis:\n');
-            fprintf('  To waypoint: %.6f\n', distance);
-            fprintf('  Distance components: dx=%.6f, dy=%.6f, dz=%.6f\n', ...
-                   nextWaypoint(1)-currentPos(1), ...
-                   nextWaypoint(2)-currentPos(2), ...
-                   nextWaypoint(3)-currentPos(3));
-            fprintf('  Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
-            
-            % FIX: Add failsafe - if we're in exactly the same position for multiple cycles
-            persistent lastPosition;
-            persistent stuckCount;
-            if isempty(lastPosition)
-                lastPosition = currentPos;
-                stuckCount = 0;
-            end
-            
-            % Check if we haven't moved
-            if norm(currentPos - lastPosition) < 1e-6
-                stuckCount = stuckCount + 1;
-                fprintf('3. Movement check: Vehicle has not moved for %d cycles\n', stuckCount);
-                
-                % If stuck for too many cycles, force movement regardless of distance
-                if stuckCount > 5
-                    fprintf('   Forcing movement after being stuck for %d cycles\n', stuckCount);
-                    
-                    % Force movement toward next waypoint, ignoring distance check
-                    direction = (nextWaypoint - currentPos);
-                    
-                    % Normalize only if magnitude isn't near zero
-                    dirMag = norm(direction);
-                    if dirMag > 1e-6
-                        direction = direction / dirMag;
-                    else
-                        % If somehow the vectors are very close but not exactly equal
-                        % Create a small random offset to break the deadlock
-                        direction = [randn(1), randn(1), 0];
-                        direction = direction / norm(direction);
-                        fprintf('   Direction too small, using random direction\n');
-                    end
-                    
-                    % Set a reasonable speed
-                    if isAerial
-                        speed = obj.AERIAL_SPEED;
-                    else
-                        speed = obj.GROUND_SPEED;
-                    end
-                    
-                    velocity = direction * speed;
-                    newMotion = zeros(1, 16);
-                    newPos = currentPos + velocity * obj.SIMULATION_STEP;
-                    
-                    newMotion(1:3) = newPos;
-                    newMotion(4:6) = velocity;
-                    newMotion(10:13) = currentMotion(10:13);
-                    
-                    if ~isAerial
-                        newMotion(3) = 0;
-                        newMotion(6) = 0;
-                    end
-                    
-                    fprintf('   Forced movement: [%.6f, %.6f, %.6f] -> [%.6f, %.6f, %.6f]\n', ...
-                           currentPos(1), currentPos(2), currentPos(3), ...
-                           newPos(1), newPos(2), newPos(3));
-                           
-                    try
-                        move(platform, newMotion);
-                        lastPosition = newPos;  % Update last position
-                        return;  % Keep the path as is, don't remove waypoints
-                    catch e
-                        fprintf('Error in forced movement: %s\n', e.message);
-                        stuckCount = 0;  % Reset stuck counter on error
-                        path = [];
-                        return;
-                    end
-                end
-            else
-                % If we've moved, reset the stuck counter
-                stuckCount = 0;
-                lastPosition = currentPos;
-            end
-            
-            % FIX: More robust waypoint reached check - ensure we're actually close enough
-            if distance < obj.REPLAN_DISTANCE && distance > 1e-6
-                path(1,:) = [];
-                fprintf('3. Waypoint reached, %d remaining\n', size(path,1));
-                
-                % FIX: Make sure we actually have enough waypoints left
-                if size(path, 1) < 2
-                    fprintf('Path too short after waypoint removal (only %d points left)\n', size(path,1));
-                    path = [];
-                    return;
-                end
-                
-                nextWaypoint = path(1, 1:3);
-                if ~isAerial
-                    nextWaypoint(3) = 0;
-                end
-                
-                % Recalculate distance to next waypoint
-                if isAerial
-                    distance = norm(nextWaypoint - currentPos);
-                else
-                    distance = norm(nextWaypoint(1:2) - currentPos(1:2));
-                end
-                
-                fprintf('  New distance to next waypoint: %.6f\n', distance);
-            elseif distance < 1e-6
-                % FIX: If distance is essentially zero but positions aren't actually equal
-                % This indicates a numerical precision issue
-                fprintf('3. Distance is zero but position mismatch exists\n');
-                fprintf('  Current: [%.6f, %.6f, %.6f], Waypoint: [%.6f, %.6f, %.6f]\n', ...
-                       currentPos(1), currentPos(2), currentPos(3), ...
-                       nextWaypoint(1), nextWaypoint(2), nextWaypoint(3));
-                
-                % Skip this waypoint as it's causing problems
-                path(1,:) = [];
-                fprintf('  Skipping problematic waypoint, %d remaining\n', size(path,1));
-                
-                if size(path, 1) < 2
-                    fprintf('Path too short after skipping waypoint\n');
-                    path = [];
-                    return;
-                end
-                
-                nextWaypoint = path(1, 1:3);
-                if ~isAerial
-                    nextWaypoint(3) = 0;
-                end
-                
-                if isAerial
-                    distance = norm(nextWaypoint - currentPos);
-                else
-                    distance = norm(nextWaypoint(1:2) - currentPos(1:2));
-                end
-            end
-            
-            if distance < 1e-6
-                fprintf('Distance too small for movement calculation\n');
-                return;
-            end
-            
-            direction = (nextWaypoint - currentPos) / distance;
+            % Set a reasonable speed
             if isAerial
                 speed = obj.AERIAL_SPEED;
             else
                 speed = obj.GROUND_SPEED;
             end
             
-            if any(isnan(direction)) || any(isinf(direction))
-                fprintf('Warning: Invalid direction vector\n');
-                return;
-            end
-            
             velocity = direction * speed;
             newMotion = zeros(1, 16);
             newPos = currentPos + velocity * obj.SIMULATION_STEP;
-            
-            if any(isnan(newPos)) || any(isinf(newPos))
-                fprintf('Warning: Invalid new position calculated\n');
-                return;
-            end
             
             newMotion(1:3) = newPos;
             newMotion(4:6) = velocity;
@@ -1164,28 +1059,150 @@ classdef centralController_RRT < handle
                 newMotion(6) = 0;
             end
             
-            if any(isnan(newMotion)) || any(isinf(newMotion))
-                fprintf('Warning: Invalid motion vector\n');
-                return;
-            end
-            
+            fprintf('   Forced movement: [%.6f, %.6f, %.6f] -> [%.6f, %.6f, %.6f]\n', ...
+                   currentPos(1), currentPos(2), currentPos(3), ...
+                   newPos(1), newPos(2), newPos(3));
+                   
             try
                 move(platform, newMotion);
+                lastPosition = newPos;  % Update last position
+                stuckPathLength = size(path, 1);  % Record current path length
                 
-                newPos = platform.read();
-                actualMovement = norm(newPos(1:3) - currentPos);
-                
-                fprintf('5. Movement:\n');
-                fprintf('  Planned: %.6f\n', norm(velocity * obj.SIMULATION_STEP));
-                fprintf('  Actual: %.6f\n', actualMovement);
-                
-                if actualMovement < 1e-6
-                    fprintf('Warning: Movement smaller than expected, potential stuckness\n');
+                % IMPORTANT: If we're stuck on the same waypoint, skip it
+                if distance < 0.1
+                    fprintf('   Skipping current waypoint to break stuck condition\n');
+                    if size(path, 1) > 1
+                        path(1,:) = [];
+                    end
                 end
+                
+                return;  % Keep the path as is, don't remove waypoints
             catch e
-                fprintf('Error in movement execution: %s\n', e.message);
+                fprintf('Error in forced movement: %s\n', e.message);
+                stuckCount = 0;  % Reset stuck counter on error
+                path = [];
+                return;
             end
         end
+    else
+        % If we've moved, reset the stuck counter
+        stuckCount = 0;
+        lastPosition = currentPos;
+        stuckPathLength = size(path, 1);
+    end
+    
+    % FIX: More robust waypoint reached check - ensure we're actually close enough
+    if distance < obj.REPLAN_DISTANCE && distance > 1e-6
+        path(1,:) = [];
+        fprintf('3. Waypoint reached, %d remaining\n', size(path,1));
+        
+        % FIX: Make sure we actually have enough waypoints left
+        if size(path, 1) < 2
+            fprintf('Path too short after waypoint removal (only %d points left)\n', size(path,1));
+            path = [];
+            return;
+        end
+        
+        nextWaypoint = path(1, 1:3);
+        if ~isAerial
+            nextWaypoint(3) = 0;
+        end
+        
+        % Recalculate distance to next waypoint
+        if isAerial
+            distance = norm(nextWaypoint - currentPos);
+        else
+            distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+        end
+        
+        fprintf('  New distance to next waypoint: %.6f\n', distance);
+    elseif distance < 1e-6
+        % FIX: If distance is essentially zero but positions aren't actually equal
+        % This indicates a numerical precision issue
+        fprintf('3. Distance is zero but position mismatch exists\n');
+        fprintf('  Current: [%.6f, %.6f, %.6f], Waypoint: [%.6f, %.6f, %.6f]\n', ...
+               currentPos(1), currentPos(2), currentPos(3), ...
+               nextWaypoint(1), nextWaypoint(2), nextWaypoint(3));
+        
+        % Skip this waypoint as it's causing problems
+        path(1,:) = [];
+        fprintf('  Skipping problematic waypoint, %d remaining\n', size(path,1));
+        
+        if size(path, 1) < 2
+            fprintf('Path too short after skipping waypoint\n');
+            path = [];
+            return;
+        end
+        
+        nextWaypoint = path(1, 1:3);
+        if ~isAerial
+            nextWaypoint(3) = 0;
+        end
+        
+        if isAerial
+            distance = norm(nextWaypoint - currentPos);
+        else
+            distance = norm(nextWaypoint(1:2) - currentPos(1:2));
+        end
+    end
+    
+    if distance < 1e-6
+        fprintf('Distance too small for movement calculation\n');
+        return;
+    end
+    
+    direction = (nextWaypoint - currentPos) / distance;
+    if isAerial
+        speed = obj.AERIAL_SPEED;
+    else
+        speed = obj.GROUND_SPEED;
+    end
+    
+    if any(isnan(direction)) || any(isinf(direction))
+        fprintf('Warning: Invalid direction vector\n');
+        return;
+    end
+    
+    velocity = direction * speed;
+    newMotion = zeros(1, 16);
+    newPos = currentPos + velocity * obj.SIMULATION_STEP;
+    
+    if any(isnan(newPos)) || any(isinf(newPos))
+        fprintf('Warning: Invalid new position calculated\n');
+        return;
+    end
+    
+    newMotion(1:3) = newPos;
+    newMotion(4:6) = velocity;
+    newMotion(10:13) = currentMotion(10:13);
+    
+    if ~isAerial
+        newMotion(3) = 0;
+        newMotion(6) = 0;
+    end
+    
+    if any(isnan(newMotion)) || any(isinf(newMotion))
+        fprintf('Warning: Invalid motion vector\n');
+        return;
+    end
+    
+    try
+        move(platform, newMotion);
+        
+        newPos = platform.read();
+        actualMovement = norm(newPos(1:3) - currentPos);
+        
+        fprintf('5. Movement:\n');
+        fprintf('  Planned: %.6f\n', norm(velocity * obj.SIMULATION_STEP));
+        fprintf('  Actual: %.6f\n', actualMovement);
+        
+        if actualMovement < 1e-6
+            fprintf('Warning: Movement smaller than expected, potential stuckness\n');
+        end
+    catch e
+        fprintf('Error in movement execution: %s\n', e.message);
+    end
+end
         function needsReplan = needsReplanning(obj, currentPos, path)
             if isempty(path)
                 needsReplan = true;

@@ -187,7 +187,9 @@ classdef searchRescueEnvironment < handle
                         [0.7 0.7 0.7], 'EdgeColor', [0.5 0.5 0.5]);
                     h4 = fill3(ax, X(:,[2 6 7 3 2])', Y(:,[2 6 7 3 2])', Z(:,[2 6 7 3 2])', ...
                         [0.7 0.7 0.7], 'EdgeColor', [0.5 0.5 0.5]);
-                    h5 = fill3(ax, X(:,[4 8 7 3 4])', Y(:,[4 8 7 3 4 1])', Z(:,[4 8 7 3 4])', ...
+                    
+                    % Fixed line: removed the extra '1' from Y array indices
+                    h5 = fill3(ax, X(:,[4 8 7 3 4])', Y(:,[4 8 7 3 4])', Z(:,[4 8 7 3 4])', ...
                         [0.9 0.9 0.9], 'EdgeColor', [0.5 0.5 0.5]);
                     h6 = fill3(ax, X(:,[1 5 6 2 1])', Y(:,[1 5 6 2 1])', Z(:,[1 5 6 2 1])', ...
                         [0.9 0.9 0.9], 'EdgeColor', [0.5 0.5 0.5]);
@@ -209,7 +211,6 @@ classdef searchRescueEnvironment < handle
                 fprintf('Error in environment show: %s\n', getReport(e));
             end
         end
-
         function [X,Y,Z] = createBuildingBox(obj, pos, dims)
             x = pos(1) + [0 dims(1) dims(1) 0 0 dims(1) dims(1) 0];
             y = pos(2) + [0 0 dims(2) dims(2) 0 0 dims(2) dims(2)];
