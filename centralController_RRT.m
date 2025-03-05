@@ -13,7 +13,7 @@ classdef centralController_RRT < handle
         vehicleStatus      % Current status of each vehicle
         
         % New RRT properties
-        rrtPlanner         % RRT planner object
+        rrtPlanner       % RRT planner object
         occMap            % Reference to occupancy map
         vehiclePaths      % Store planned paths for each vehicle
     end
