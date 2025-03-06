@@ -1,65 +1,69 @@
-function h = loadCustomMesh(objFile, scaleFactor, position, rotationMatrix)
-% loadCustomMesh - Load an OBJ file and apply scaling, rotation, and translation.
-%
-%   h = loadCustomMesh(objFile, scaleFactor, position, rotationMatrix)
-%
-%   Inputs:
-%       objFile       - String, path to the OBJ file (e.g., 'drawings/building.obj').
-%       scaleFactor   - Scalar to scale the vertex coordinates.
-%       position      - 1x3 vector specifying the translation.
-%       rotationMatrix- 3x3 rotation matrix. Pass eye(3) if no rotation needed.
-%
-%   Output:
-%       h             - Handle to the patch object displaying the mesh.
-%
-% Note: This is a basic OBJ importer that reads vertices and faces.
-%       For more robust support (e.g., texture coordinates), consider
-%       using a File Exchange function like readObj.m.
-
-    % Open the file.
-    fid = fopen(objFile, 'r');
-    if fid == -1
-        error('Cannot open OBJ file: %s', objFile);
+function geom = loadCustomMesh(objFile, scaleFactor, position, rotationMatrix)
+    % Check if file exists
+    if ~exist(objFile, 'file')
+        error('File does not exist: %s', objFile);
     end
-
-    vertices = [];
-    faces = [];
-    % Read file line-by-line
-    tline = fgetl(fid);
-    while ischar(tline)
-        if startsWith(tline, 'v ')
-            % Parse a vertex line, e.g., "v 1.0 2.0 3.0"
-            parts = sscanf(tline, 'v %f %f %f');
-            vertices = [vertices; parts'];
-        elseif startsWith(tline, 'f ')
-            % Parse a face line. Faces may include slashes; we remove them.
-            % Example face line: "f 1/1/1 2/2/2 3/3/3"
-            parts = regexp(tline, 'f\s+([\d]+)/?[\d]*\s+([\d]+)/?[\d]*\s+([\d]+)/?[\d]*', 'tokens');
-            if ~isempty(parts)
-                f = str2double(parts{1});
-                faces = [faces; f];
-            else
-                % If the above fails, try a simpler approach.
-                parts = sscanf(tline, 'f %d %d %d');
-                faces = [faces; parts'];
-            end
+    
+    try
+        % Read the OBJ file
+        fid = fopen(objFile, 'r');
+        if fid == -1
+            error('Cannot open OBJ file: %s', objFile);
         end
+        
+        vertices = [];
+        faces = [];
+        
         tline = fgetl(fid);
+        while ischar(tline)
+            if startsWith(tline, 'v ')
+                % Read vertex data (x, y, z)
+                data = sscanf(tline, 'v %f %f %f');
+                if numel(data) >= 3
+                    vertices = [vertices; data(1:3)'];
+                end
+            elseif startsWith(tline, 'f ')
+                % Parse face data (handles both "f v1 v2 v3" and "f v1/vt1/vn1 v2/vt2/vn2 v3/vt3/vn3" formats)
+                if contains(tline, '/')
+                    % Format with texture/normal indices
+                    parts = regexp(tline, '\d+', 'match');
+                    if length(parts) >= 3
+                        f = [str2double(parts{1}), str2double(parts{4}), str2double(parts{7})];
+                        faces = [faces; f];
+                    end
+                else
+                    % Simple format
+                    parts = sscanf(tline, 'f %d %d %d');
+                    if length(parts) >= 3
+                        faces = [faces; parts(1:3)'];
+                    end
+                end
+            end
+            tline = fgetl(fid);
+        end
+        fclose(fid);
+        
+        % Apply transformations
+        % First scale
+        vertices = vertices * scaleFactor;
+        
+        % Then rotate (use the rotationMatrix)
+        vertices = (rotationMatrix * vertices')';
+        
+        % Then translate
+        vertices = vertices + repmat(position, size(vertices, 1), 1);
+        
+        % Ensure faces are using 1-based indexing (OBJ can use 0-based)
+        if ~isempty(faces) && min(faces(:)) == 0
+            faces = faces + 1;
+        end
+        
+        % Create the output structure in the correct format for updateMesh
+        geom.vertices = vertices;
+        geom.faces = faces;
+        
+    catch e
+        fclose(fid);
+        error('Error processing OBJ file: %s - %s', objFile, e.message);
     end
-    fclose(fid);
-
-    % Apply scaling
-    vertices = vertices * scaleFactor;
-    % Apply rotation
-    vertices = (rotationMatrix * vertices')';
-    % Apply translation
-    vertices = vertices + repmat(position, size(vertices, 1), 1);
-
-    % Create the patch object
-    h = patch('Vertices', vertices, 'Faces', faces, ...
-              'FaceColor', [0.8 0.8 0.8], 'EdgeColor', 'none');
-    % Set up material and lighting for realism
-    material shiny;
-    camlight('headlight');
-    lighting gouraud;
 end
