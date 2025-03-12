@@ -6,7 +6,7 @@ close all;
 % Configuration
 dimensions = [300, 300, 100];
 numAerial = 1;
-numGround = 0;
+numGround = 1;
 testDuration = 1200; % seconds
 
 % Enhanced metrics storage
@@ -91,6 +91,7 @@ try
     fprintf('\n2. Creating RRT Controller with %d aerial and %d ground vehicles...\n', ...
             numAerial, numGround);
     controller = centralController_RRT(environment, numAerial, numGround);
+    controller.debugEnabled = true;  % Turn on all debug prints
 
     testScenarios = {
     {[30, 30, 30], [30, 30, 0], 'Pure Descent Test'},           % Vertical descent
