@@ -10,12 +10,7 @@ classdef centralController_RRT < handle
         lastAssignmentTime = 0  % Track when we last made assignments
         REASSIGNMENT_INTERVAL = 5.0  % How often to check for new assignments (seconds
         vehicleAssignments = containers.Map('KeyType', 'char', 'ValueType', 'double')  % Explicitly specify types
-        vehicleInDescent = containers.Map('KeyType', 'char', 'ValueType', 'logical')  % FIX: Initialize missing map
         vehicleStatus      % Current status of each vehicle
-        loopCounter = 0    % Add counter to track potential infinite loops
-        debugEnabled (1,1) logical = false
-        lastPositionMap   % (containers.Map) vehicleID -> last [x y z]
-        stuckCountMap     % (containers.Map) vehicleID -> stuck cycle count
         
         % New RRT properties
         rrtPlanner         % RRT planner object
@@ -37,7 +32,7 @@ classdef centralController_RRT < handle
         
         % RRT Constants
         MAX_PLANNING_ATTEMPTS = 10  % Maximum attempts to find valid path
-        REPLAN_DISTANCE = 0.5    % Distance threshold for replanning
+        REPLAN_DISTANCE = 5     % Distance threshold for replanning
     end
     
     methods
@@ -62,9 +57,6 @@ classdef centralController_RRT < handle
             % Initialize vehicle assignments map with explicit types
             obj.vehicleAssignments = containers.Map('KeyType', 'char', 'ValueType', 'double');
             
-            % FIX: Initialize vehicleInDescent map with explicit types
-            obj.vehicleInDescent = containers.Map('KeyType', 'char', 'ValueType', 'logical');
-            
             % Initialize survivor manager and generate survivors
             obj.survivorManager = SurvivorManager(environment);
             numSurvivors = randi([5, 10]);
@@ -75,14 +67,9 @@ classdef centralController_RRT < handle
             % Initialize vehicles
             obj.initializeAerialVehicles();
             obj.initializeGroundVehicles();
-
-            % Initialize stuck detection maps
-            obj.lastPositionMap = containers.Map('KeyType','char','ValueType','any');
-            obj.stuckCountMap   = containers.Map('KeyType','char','ValueType','double');
         end
         
         function initializeRRTPlanner(obj)
-            rng(12345);  % Fixed seed for debugging
             fprintf('Creating SE3 state space...\n');
             ss = stateSpaceSE3;
             
@@ -128,8 +115,6 @@ classdef centralController_RRT < handle
                 
                 fprintf('Start position validity check: %d\n', obj.isPositionValid(startPos));
                 fprintf('Goal position validity check: %d\n', obj.isPositionValid(goalPos));
-
-                
                 
                 % If ground vehicle, set Z=0 and check obstacles
                 if ~isAerial
@@ -147,7 +132,17 @@ classdef centralController_RRT < handle
                             return;
                         end
                     end
+
+                    else
+                    % FORCE UAV to come down to 10m altitude near the survivor
+                    if goalPos(3) < 10
+                        goalPos(3) = 10;
+                    end
                 end
+
+                rng('default');  % or rng(0);
+
+       
                 
                 if ~obj.isPositionValid(startPos) || ~obj.isPositionValid(goalPos)
                     fprintf('Start or goal position outside environment bounds\n');
@@ -161,14 +156,6 @@ classdef centralController_RRT < handle
                 elseif isAerial
                     fprintf('Planning direct aerial path from [%.1f, %.1f, %.1f] to [%.1f, %.1f, %.1f]\n', ...
                             startPos(1), startPos(2), startPos(3), goalPos(1), goalPos(2), goalPos(3));
-
-                end
-
-                if obj.debugEnabled
-                    fprintf('[planPath DEBUG] Start valid? %d, Goal valid? %d\n',...
-                        obj.isPositionValid(startPos), obj.isPositionValid(goalPos));
-                    fprintf('[planPath DEBUG] isAerial=%d, Start=[%.2f %.2f %.2f], Goal=[%.2f %.2f %.2f]\n',...
-                        isAerial, startPos(1), startPos(2), startPos(3), goalPos(1), goalPos(2), goalPos(3));
                 end
                 
                 % Build SE3 states
@@ -198,62 +185,6 @@ classdef centralController_RRT < handle
                 disp(solnInfo);
                 
                 path = pathObj.States;
-                path = obj.interpolatePath(path, 2.0);
-
-                if ~solnInfo.IsPathFound && isAerial
-                    fprintf('[planPath] Direct plan to [%.1f %.1f %.1f] failed. Trying fallback approach...\n', ...
-                            goalPos(1), goalPos(2), goalPos(3));
-                    
-                    hoverAlt = 25;   % pick a safe altitude above obstacles
-                    % Step A: ascend/maintain altitude from startPos(3) to hoverAlt
-                    intermediate1 = [startPos(1), startPos(2), hoverAlt];
-                    [pathObjA, solnA] = plan(obj.rrtPlanner, ...
-                        [startPos, 1, 0, 0, 0], ...
-                        [intermediate1, 1, 0, 0, 0]);
-                
-                    if ~solnA.IsPathFound
-                        % No fallback found => fail
-                        success = false;
-                        path = [];
-                        return;
-                    end
-                
-                    % Step B: fly horizontally to [goalPos(1), goalPos(2), hoverAlt]
-                    intermediate2 = [goalPos(1), goalPos(2), hoverAlt];
-                    [pathObjB, solnB] = plan(obj.rrtPlanner, ...
-                        [intermediate1, 1, 0, 0, 0], ...
-                        [intermediate2, 1, 0, 0, 0]);
-                    
-                    if ~solnB.IsPathFound
-                        success = false;
-                        path = [];
-                        return;
-                    end
-                
-                    % Step C: optional final descent
-                    finalAlt = max(5, goalPos(3)); % don't go exactly 0 if not needed
-                    finalGoal = [goalPos(1), goalPos(2), finalAlt];
-                    [pathObjC, solnC] = plan(obj.rrtPlanner, ...
-                        [intermediate2, 1, 0, 0, 0], ...
-                        [finalGoal, 1, 0, 0, 0]);
-                
-                    if ~solnC.IsPathFound
-                        success = false;
-                        path = [];
-                        return;
-                    end
-                
-                    % Merge fallback paths
-                    fallbackPath = [
-                        pathObjA.States;
-                        pathObjB.States(2:end,:);
-                        pathObjC.States(2:end,:)
-                    ];
-                
-                    path = fallbackPath;
-                    solnInfo.IsPathFound = true; % Mark as found
-                    fprintf('[planPath] Fallback path constructed with %d waypoints.\n', size(path,1));
-                end
                 
                 % Validate path
                 isValid = true;
@@ -297,10 +228,9 @@ classdef centralController_RRT < handle
         
         function valid = isPositionValid(obj, position)
             margin = 2.0;  
-            tol = 0.5;  % tolerance in meters
-            valid = position(1) >= margin && position(1) <= (obj.environment.dimensions(1) - margin + tol) && ...
-                    position(2) >= margin && position(2) <= (obj.environment.dimensions(2) - margin + tol) && ...
-                    position(3) >= 0      && position(3) <= (obj.environment.dimensions(3));
+            valid = position(1) >= margin && position(1) <= (obj.environment.dimensions(1) - margin) && ...
+                    position(2) >= margin && position(2) <= (obj.environment.dimensions(2) - margin) && ...
+                    position(3) >= 0 && position(3) <= (obj.environment.dimensions(3));
         end
         
         function initializeAerialVehicles(obj)
@@ -492,33 +422,8 @@ classdef centralController_RRT < handle
         
                 obj.missionStatus = 'ACTIVE';
                 lastCheckTime = 0;
-                obj.loopCounter = 0; % Initialize loop counter
         
                 while ishandle(fig)
-                    % Increment loop counter and check for potential infinite loops
-                    obj.loopCounter = obj.loopCounter + 1;
-                     if obj.debugEnabled
-                        fprintf('[startMission DEBUG] LoopCounter=%d, CurrentTime=%.2f, #vehicleAssignments=%d\n',...
-                            obj.loopCounter, obj.environment.scenario.CurrentTime, obj.vehicleAssignments.Count);
-                    end
-                    if mod(obj.loopCounter, 100) == 0
-                        fprintf('Warning: Mission loop iteration %d - check for possible infinite loops\n', obj.loopCounter);
-                        
-                        % Every 1000 iterations, do a deep check for stuck vehicles
-                        if mod(obj.loopCounter, 1000) == 0
-                            fprintf('ALERT: Possible simulation hanging detected. Checking vehicles...\n');
-                            for v = 1:obj.numAerialVehicles
-                                vehicleID = sprintf('UAV%d', v);
-                                if obj.vehicleAssignments.isKey(vehicleID)
-                                    fprintf('Forcing reassignment for potentially stuck vehicle %s\n', vehicleID);
-                                    obj.vehicleAssignments.remove(vehicleID);
-                                end
-                            end
-                            [newAssign, ~] = obj.assignSurvivorsToVehicles();
-                            fprintf('Deep check: Made %d new assignments\n', newAssign);
-                        end
-                    end
-                    
                     currentTime = obj.environment.scenario.CurrentTime;
         
                     if currentTime - lastCheckTime >= obj.SIMULATION_STEP
@@ -591,18 +496,9 @@ classdef centralController_RRT < handle
         end
 
         function checkSurvivorDetection(obj)
-            % Define detection parameters
             DETECTION_RADIUS = 70;
             DETECTION_HEIGHT = 10.0;
             HEIGHT_TOLERANCE = 5.0;
-            
-            %%% Improvement 3: Hysteresis Implementation
-            % Create a persistent counter map so that detection conditions must be met
-            % for 2 consecutive cycles before a survivor is marked as detected.
-            persistent detectionCounter;
-            if isempty(detectionCounter)
-                detectionCounter = containers.Map('KeyType', 'char', 'ValueType', 'double');
-            end
             
             if ~isempty(obj.vehicleAssignments) && obj.vehicleAssignments.Count > 0
                 assignmentKeys = obj.vehicleAssignments.keys;
@@ -612,18 +508,12 @@ classdef centralController_RRT < handle
                         vehicleID = char(assignmentKeys{k});
                         survivorID = obj.vehicleAssignments(vehicleID);
                         survivor = obj.findSurvivorByID(survivorID);
-
-                         if obj.debugEnabled
-                            fprintf('[checkSurvivorDetection DEBUG] Vehicle=%s => Checking survivor %d\n',...
-                                vehicleID, survivorID);
-                        end
                         
                         if ~isempty(survivor)
                             fprintf('\n=== Processing Vehicle %s ===\n', vehicleID);
                             fprintf('Target Survivor %d - Current Status: %s\n', survivorID, survivor.Status);
                             
                             if contains(vehicleID, 'UAV')
-                                % UAV detection logic
                                 idx = str2double(vehicleID(4:end));
                                 platform = obj.aerialPlatforms{idx};
                                 currentMotion = platform.read();
@@ -632,76 +522,75 @@ classdef centralController_RRT < handle
                                 horizontalDist = norm(survivor.Position(1:2) - vehiclePos(1:2));
                                 targetHeight = survivor.Position(3) + DETECTION_HEIGHT;
                                 currentHeight = vehiclePos(3);
-                                
+        
+                                %%% NEW DEBUG CODE %%%
+                                dx = survivor.Position(1) - vehiclePos(1);
+                                dy = survivor.Position(2) - vehiclePos(2);
+                                fprintf('DEBUG: dx=%.2f, dy=%.2f => horizontalDist=%.2f\n', ...
+                                        dx, dy, horizontalDist);
+        
+                                if norm(currentMotion(4:6)) < 0.1
+                                    fprintf('\nUAV%d Hover Analysis:\n', idx);
+                                    fprintf('- Current position: [%.2f, %.2f, %.2f]\n', ...
+                                        vehiclePos(1), vehiclePos(2), vehiclePos(3));
+                                    fprintf('- Current velocity: [%.2f, %.2f, %.2f]\n', ...
+                                        currentMotion(4), currentMotion(5), currentMotion(6));
+                                    fprintf('- Path empty? %d\n', isempty(obj.vehiclePaths{idx}));
+                                    fprintf('- Distance to target: %.2f\n', horizontalDist);
+                                    fprintf('- Height difference from target: %.2f\n', ...
+                                        abs(currentHeight - targetHeight));
+                                end
+        
+                                fprintf('Height Analysis:\n');
+                                fprintf('  Current: %.2f, Target: %.2f, Cruise: %.2f\n', ...
+                                    currentHeight, targetHeight, obj.CRUISE_HEIGHT);
+        
+                                % Existing debug lines
+                                fprintf('Survivor XY: [%.2f, %.2f], Vehicle XY: [%.2f, %.2f]\n',...
+                                    survivor.Position(1), survivor.Position(2), ...
+                                    vehiclePos(1), vehiclePos(2));
                                 fprintf('Horizontal Distance: %.2f\n', horizontalDist);
-                                fprintf('Height Analysis: Current = %.2f, Target = %.2f\n', currentHeight, targetHeight);
                                 
                                 % Check detection conditions
-                                if horizontalDist < DETECTION_RADIUS && abs(currentHeight - targetHeight) < HEIGHT_TOLERANCE
-                                    key = vehicleID;
-                                    if detectionCounter.isKey(key)
-                                        detectionCounter(key) = detectionCounter(key) + 1;
-                                    else
-                                        detectionCounter(key) = 1;
-                                    end
-                                    % Only trigger detection if conditions hold for 2 consecutive cycles
-                                    if detectionCounter(key) >= 2
-                                        if obj.debugEnabled
-                                            fprintf('[checkSurvivorDetection] Reached detection threshold for %s on survivor %d\n',...
-                                                vehicleID, survivorID);
-                                        end
-                                        fprintf('Detection conditions met consistently!\n');
-                                        fprintf('State transition: %s -> DETECTED\n', survivor.Status);
-                                        survivor.Status = 'DETECTED';
-                                        survivor.Visited = true;
-                                        if isfield(obj, 'metrics') && isfield(obj.metrics, 'survivorsDetected')
-                                            obj.metrics.survivorsDetected = obj.metrics.survivorsDetected + 1;
-                                        end
-                                        
-                                        if obj.vehicleAssignments.isKey(vehicleID)
-                                            obj.vehicleAssignments.remove(vehicleID);
-                                        end
-                                        if isfield(obj, 'vehicleInDescent') && obj.vehicleInDescent.isKey(vehicleID)
-                                            obj.vehicleInDescent.remove(vehicleID);
-                                        end
-                                        
-                                        % Command the UAV to return to cruise height
-                                        returnMotion = zeros(1, 16);
-                                        returnMotion(1:3) = vehiclePos;
-                                        returnMotion(3) = obj.CRUISE_HEIGHT;
-                                        returnMotion(4:6) = [0, 0, 2.0];
-                                        returnMotion(10:13) = currentMotion(10:13);
-                                        move(platform, returnMotion);
-                                        
-                                        [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
-                                        fprintf('New assignments made: %d\n', assignmentsMade);
-                                    end
-                                else
-                                    % Reset counter if condition fails
-                                    if detectionCounter.isKey(vehicleID)
-                                        detectionCounter(vehicleID) = 0;
-                                    end
+                                if horizontalDist < DETECTION_RADIUS && ...
+                                   abs(currentHeight - targetHeight) < HEIGHT_TOLERANCE
+                                    
+                                    fprintf('Detection conditions met!\n');
+                                    fprintf('State transition: %s -> DETECTED\n', survivor.Status);
+                                    survivor.Status = 'DETECTED';
+                                    survivor.Visited = true;
+                                    obj.vehicleAssignments.remove(vehicleID);
+                                    obj.vehicleInDescent.remove(vehicleID);
+                                    
+                                    returnMotion = zeros(1, 16);
+                                    returnMotion(1:3) = vehiclePos;
+                                    returnMotion(3) = obj.CRUISE_HEIGHT;
+                                    returnMotion(4:6) = [0, 0, 2.0];
+                                    returnMotion(10:13) = currentMotion(10:13);
+                                    
+                                    move(platform, returnMotion);
+                                    
+                                    [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
+                                    fprintf('New assignments made: %d\n', assignmentsMade);
                                 end
-                                
+                                                                        
                             else
-                                % Ground vehicle detection logic (unchanged)
+                                % Ground vehicle logic
                                 idx = str2double(vehicleID(7:end));
                                 platform = obj.groundPlatforms{idx};
                                 currentMotion = platform.read();
                                 vehiclePos = currentMotion(1:3);
                                 
                                 distToSurvivor = norm(survivor.Position(1:2) - vehiclePos(1:2));
-                                fprintf('Ground%d Analysis: Distance to survivor = %.2f\n', idx, distToSurvivor);
+                                fprintf('Ground%d Analysis:\n', idx);
+                                fprintf('  Distance to survivor: %.2f\n', distToSurvivor);
                                 
                                 if distToSurvivor < DETECTION_RADIUS
                                     fprintf('Ground detection conditions met!\n');
                                     fprintf('State transition: %s -> DETECTED\n', survivor.Status);
                                     survivor.Status = 'DETECTED';
                                     survivor.Visited = true;
-                                    
-                                    if obj.vehicleAssignments.isKey(vehicleID)
-                                        obj.vehicleAssignments.remove(vehicleID);
-                                    end
+                                    obj.vehicleAssignments.remove(vehicleID);
                                     
                                     [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
                                     if assignmentsMade > 0 && obj.vehicleAssignments.isKey(vehicleID)
@@ -723,9 +612,15 @@ classdef centralController_RRT < handle
                         fprintf('Error in detection: %s\n', getReport(e));
                     end
                 end
+                
+                props = properties(obj.survivorManager);
+                fprintf('\nSurvivor Manager Properties:\n');
+                for i = 1:length(props)
+                    fprintf('  %s\n', props{i});
+                end
             end
-            
-            % Optional: Force path regeneration if necessary (existing code below)
+        
+            % Force path regeneration if needed
             for i = 1:obj.numAerialVehicles
                 vehicleID = sprintf('UAV%d', i);
                 if isempty(obj.vehiclePaths{i}) && obj.vehicleAssignments.isKey(vehicleID)
@@ -738,7 +633,7 @@ classdef centralController_RRT < handle
                         [success, newPath] = obj.planPath(currentPos(1:3), targetPos, true);
                         if success
                             obj.vehiclePaths{i} = newPath;
-                            fprintf('New path generated for UAV%d with %d waypoints\n', i, size(newPath, 1));
+                            fprintf('New path generated for UAV%d with %d waypoints\n', i, size(newPath,1));
                         end
                     end
                 end
@@ -883,23 +778,6 @@ classdef centralController_RRT < handle
                     
                     fprintf('\nUAV%d Update:\n', i);
                     fprintf('Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
-
-                    if obj.debugEnabled
-                        fprintf('[updateVehiclePaths DEBUG] UAV%d velocity=[%.2f %.2f %.2f], pathExists=%d\n',...
-                            i, currentMotion(4), currentMotion(5), currentMotion(6), ~isempty(obj.vehiclePaths{i}));
-                    end
-                    
-                    % FIX: Add explicit state check for stuck UAVs
-                    if norm(currentMotion(4:6)) < 0.01 && isempty(obj.vehiclePaths{i})
-                        % UAV is not moving and has no path
-                        fprintf('UAV%d appears to be stuck - forcing reassignment\n', i);
-                        % Force reassignment and path regeneration
-                        vehicleID = sprintf('UAV%d', i);
-                        if obj.vehicleAssignments.isKey(vehicleID)
-                            obj.vehicleAssignments.remove(vehicleID);
-                        end
-                        [assignmentsMade, ~] = obj.assignSurvivorsToVehicles();
-                    end
                     
                     vehicleID = sprintf('UAV%d', i);
                     if obj.vehicleAssignments.isKey(vehicleID)
@@ -923,7 +801,8 @@ classdef centralController_RRT < handle
                     
                     if ~isempty(obj.vehiclePaths{i})
                         try
-                             newPath = obj.followPathSegment(obj.aerialPlatforms{i}, obj.vehiclePaths{i}, true);
+                            newPath = obj.followPathSegment(obj.aerialPlatforms{i}, obj.vehiclePaths{i}, true);
+                            
                             % ----------------------------------
                             % If the path became empty, do checks
                             % ----------------------------------
@@ -959,7 +838,7 @@ classdef centralController_RRT < handle
                                     i, updatedMotion(1), updatedMotion(2), updatedMotion(3));
                             end
                             
-                            newPath;
+                            obj.vehiclePaths{i} = newPath;
                         catch e
                             fprintf('Error in path following: %s\n', e.message);
                             obj.vehiclePaths{i} = [];  % Clear invalid path
@@ -979,11 +858,7 @@ classdef centralController_RRT < handle
                     
                     fprintf('\nGround%d Update:\n', i);
                     fprintf('Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
-                    if obj.debugEnabled
-                        fprintf('[updateVehiclePaths DEBUG] UAV%d velocity=[%.2f %.2f %.2f], pathExists=%d\n',...
-                            i, currentMotion(4), currentMotion(5), currentMotion(6), ~isempty(obj.vehiclePaths{i}));
-                    end
-                                        
+                    
                     vehicleID = sprintf('Ground%d', i);
                     if obj.vehicleAssignments.isKey(vehicleID)
                         survivorID = obj.vehicleAssignments(vehicleID);
@@ -1050,74 +925,34 @@ classdef centralController_RRT < handle
         function path = followPathSegment(obj, platform, path, isAerial)
             fprintf('\n=== Path Following Analysis ===\n');
             
-            %------------------------------------------------
-            % 1) Basic trivial-path check
-            %------------------------------------------------
             if isempty(path) || size(path, 1) < 2
                 fprintf('Path requires regeneration (length=%d)\n', size(path, 1));
                 path = [];
                 return;
             end
-        
-            % Optional: remove big duplicates
-            uniqueXYZ = unique(path(:,1:3), 'rows');
-            if size(uniqueXYZ,1) < 2
-                fprintf('[followPathSegment] Path has repeated coords only => clearing.\n');
-                path = [];
-                return;
-            end
             
-            %------------------------------------------------
-            % 2) Read current position & see if we must unassign
-            %------------------------------------------------
             currentMotion = platform.read();
             currentPos = currentMotion(1:3);
-        
-            vehicleID = platform.Name; % e.g. "UAV1_aerial" or "Ground1_ground"
-            if obj.vehicleAssignments.isKey(vehicleID)
-                sID  = obj.vehicleAssignments(vehicleID);
-                surv = obj.findSurvivorByID(sID);
-                if ~isempty(surv)
-                    distToSurvivor = norm(surv.Position(1:2) - currentPos(1:2));
-                    if distToSurvivor > 50
-                        fprintf('[followPathSegment] We are still %.1f away => clearing path & assignment.\n', distToSurvivor);
-                        path = [];
-                        obj.vehicleAssignments.remove(vehicleID);
-                        return;
-                    end
+
+             if size(path, 1) >= 2
+                distToFirst = norm(currentPos - path(1,1:3));
+                distToSecond = norm(path(1,1:3) - path(2,1:3));
+                % If the path's first row is basically identical to currentPos,
+                % and there is at least one other waypoint, pop it off:
+                if distToFirst < 1e-6 && distToSecond > 1e-6
+                    fprintf('DEBUG: Removing duplicated first row in path.\n');
+                    path(1,:) = [];
                 end
             end
-        
+            
             fprintf('1. Current State:\n');
-            fprintf('   Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
-        
-            %------------------------------------------------
-            % 3) Identify nextWaypoint
-            %------------------------------------------------
-            nextWaypoint = path(1,1:3);
+            fprintf('  Position: [%.2f, %.2f, %.2f]\n', currentPos(1), currentPos(2), currentPos(3));
+            
+            nextWaypoint = path(1, 1:3);
             if ~isAerial
                 nextWaypoint(3) = 0;
             end
             
-            % (Optional) Clean up repeated or tiny steps
-            % If the distance from path(1) to path(2) is tiny, skip path(1).
-            if size(path,1) >= 2
-                dFirstTwo = norm(path(2,1:3) - path(1,1:3));
-                if dFirstTwo < 0.01
-                    % i.e. basically the same point => remove
-                    fprintf('[followPathSegment] Waypoint(1) and (2) are only %.3f apart => removing #1.\n', dFirstTwo);
-                    path(1,:) = [];
-                    if size(path,1)<2
-                        return;  % might be empty or 1 left
-                    end
-                    nextWaypoint = path(1,1:3);
-                    if ~isAerial
-                        nextWaypoint(3)=0;
-                    end
-                end
-            end
-            
-            % Compute distance
             if isAerial
                 distance = norm(nextWaypoint - currentPos);
             else
@@ -1125,188 +960,87 @@ classdef centralController_RRT < handle
             end
             
             fprintf('2. Distance Analysis:\n');
-            fprintf('   To waypoint: %.3f\n', distance);
-            fprintf('   Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
-        
-            %------------------------------------------------
-            % 4) Check if stuck (same logic as you had)
-            %------------------------------------------------
-            vehicleName = platform.Name;  
-            if ~isKey(obj.lastPositionMap, vehicleName)
-                obj.lastPositionMap(vehicleName) = currentPos;
-                obj.stuckCountMap(vehicleName)   = 0;
-            end
+            fprintf('  To waypoint: %.2f\n', distance);
+            fprintf('  Replan threshold: %.2f\n', obj.REPLAN_DISTANCE);
             
-            prevPos    = obj.lastPositionMap(vehicleName);
-            stuckCount = obj.stuckCountMap(vehicleName);
-            movement   = norm(currentPos - prevPos);
-        
-            if movement < 1e-6
-                stuckCount = stuckCount + 1;
-                obj.stuckCountMap(vehicleName) = stuckCount;
-                fprintf('3. Movement check: Vehicle %s not moved for %d cycles\n', vehicleName, stuckCount);
-                
-                if stuckCount > 5
-                    fprintf('   Forcing movement after being stuck.\n');
-                    direction = (nextWaypoint - currentPos);
-                    dirMag    = norm(direction);
-                    if dirMag < 1e-6
-                        direction = [randn(1), randn(1), 0];
-                        direction = direction / norm(direction);
-                    else
-                        direction = direction / dirMag;
-                    end
-                    
-                    if isAerial
-                        speed = obj.AERIAL_SPEED;
-                    else
-                        speed = obj.GROUND_SPEED;
-                    end
-                    
-                    velocity = direction * speed;
-                    newMotion = zeros(1,16);
-                    newPos = currentPos + velocity*obj.SIMULATION_STEP;
-                    newMotion(1:3) = newPos;
-                    newMotion(4:6) = velocity;
-                    newMotion(10:13) = currentMotion(10:13);
-                    if ~isAerial
-                        newMotion(3) = 0;
-                        newMotion(6) = 0;
-                    end
-                    try
-                        move(platform, newMotion);
-                        obj.lastPositionMap(vehicleName) = newPos; % update
-                    catch forcedErr
-                        fprintf('Error forced movement: %s\n', forcedErr.message);
-                        obj.stuckCountMap(vehicleName) = 0;
-                        path = [];
-                    end
-                    return;
-                end
-            else
-                obj.stuckCountMap(vehicleName)   = 0;
-                obj.lastPositionMap(vehicleName) = currentPos;
-            end
-            
-            %------------------------------------------------
-            % 5) Check if “already at waypoint”
-            %------------------------------------------------
             if distance < obj.REPLAN_DISTANCE
-                fprintf('[followPathSegment] Current WP reached or too close (dist=%.3f < %.2f)\n',...
-                        distance, obj.REPLAN_DISTANCE);
                 path(1,:) = [];
+                fprintf('3. Waypoint reached, %d remaining\n', size(path,1));
                 
-                if isempty(path)
-                    fprintf('   Path completed (all WPs used).\n');
-                    return;
-                elseif size(path,1) == 1
-                    finalWP = path(1,1:3);
-                    if ~isAerial, finalWP(3)=0; end
-                    newMotion = currentMotion;
-                    newMotion(1:3) = finalWP;
-                    move(platform, newMotion);
-                    fprintf('   Moved to final WP => path done.\n');
-                    path = [];
-                    return;
-                else
-                    % re-check new next WP
-                    nextWaypoint = path(1,1:3);
-                    if ~isAerial, nextWaypoint(3)=0; end
-                    
+                if size(path, 1) >= 2
+                    nextWaypoint = path(1, 1:3);
+                    if ~isAerial
+                        nextWaypoint(3) = 0;
+                    end
                     if isAerial
                         distance = norm(nextWaypoint - currentPos);
                     else
                         distance = norm(nextWaypoint(1:2) - currentPos(1:2));
                     end
-                    fprintf('   Next WP => [%.2f %.2f %.2f], dist=%.2f\n',...
-                        nextWaypoint(1), nextWaypoint(2), nextWaypoint(3), distance);
+                else
+                    fprintf('Path too short after waypoint removal\n');
+                    path = [];
+                    return;
                 end
             end
             
-            % If still < 1e-6, skip
             if distance < 1e-6
-                fprintf('Distance too small => skip.\n');
+                fprintf('Distance too small for movement calculation\n');
                 return;
             end
             
-            %------------------------------------------------
-            % 6) Normal motion along path
-            %------------------------------------------------
             direction = (nextWaypoint - currentPos) / distance;
-            if any(isnan(direction)) || any(isinf(direction))
-                fprintf('Warning: invalid direction\n');
-                return;
-            end
-            
             if isAerial
                 speed = obj.AERIAL_SPEED;
             else
                 speed = obj.GROUND_SPEED;
             end
-            
-            velocity = direction*speed;
-            newMotion = zeros(1,16);
-            newMotion(1:3) = currentPos;   % We’ll fill in after we do overshoot check
-            newMotion(4:6) = velocity;
-            newMotion(10:13) = currentMotion(10:13);
-            if ~isAerial
-                newMotion(3)=0;
-                newMotion(6)=0;
-            end
-            
-            % Keep the oldDist so we can see if we made progress or overshot
-            oldDist = distance;
-            plannedMove = norm(velocity * obj.SIMULATION_STEP);
-            newPos = currentPos + direction * plannedMove;
-            
-            % Actually do the move
-            newMotion(1:3) = newPos;
-            try
-                move(platform, newMotion);
-            catch e
-                fprintf('Error in movement: %s\n', e.message);
+            if any(isnan(direction)) || any(isinf(direction))
+                fprintf('Warning: Invalid direction vector\n');
                 return;
             end
             
-            movedPos = platform.read();
-            actualMovement = norm(movedPos(1:3) - currentPos);
-            fprintf('5. Movement:\n');
-            fprintf('   Planned: %.3f\n', plannedMove);
-            fprintf('   Actual:  %.3f\n', actualMovement);
-        
-            %------------------------------------------------
-            % 7) [A] Overshoot check
-            %------------------------------------------------
-            if isAerial
-                newDist = norm(nextWaypoint - movedPos(1:3));
-            else
-                newDist = norm(nextWaypoint(1:2) - movedPos(1:2));
+            velocity = direction * speed;
+            newMotion = zeros(1, 16);
+            newPos = currentPos + velocity * obj.SIMULATION_STEP;
+            
+            if any(isnan(newPos)) || any(isinf(newPos))
+                fprintf('Warning: Invalid new position calculated\n');
+                return;
             end
             
-            fprintf('   oldDist=%.3f => newDist=%.3f\n', oldDist, newDist);
+            newMotion(1:3) = newPos;
+            newMotion(4:6) = velocity;
+            newMotion(10:13) = currentMotion(10:13);
             
-            % If we ended up further from the waypoint than we started => remove WP
-            if newDist > oldDist
-                fprintf('   Overshoot detected => removing this WP.\n');
-                % remove from the path
-                path(1,:) = [];
-                if isempty(path)
-                    fprintf('   Path is now empty => done.\n');
-                    return;
+            if ~isAerial
+                newMotion(3) = 0;
+                newMotion(6) = 0;
+            end
+            
+            if any(isnan(newMotion)) || any(isinf(newMotion))
+                fprintf('Warning: Invalid motion vector\n');
+                return;
+            end
+            
+            try
+                move(platform, newMotion);
+                
+                newPos = platform.read();
+                actualMovement = norm(newPos(1:3) - currentPos);
+                
+                fprintf('5. Movement:\n');
+                fprintf('  Planned: %.6f\n', norm(velocity * obj.SIMULATION_STEP));
+                fprintf('  Actual: %.6f\n', actualMovement);
+                
+                if actualMovement < 1e-6
+                    fprintf('Warning: Movement smaller than expected\n');
                 end
-                if size(path,1)==1
-                    % Move forcibly to final
-                    finalWP = path(1,1:3);
-                    if ~isAerial, finalWP(3)=0; end
-                    forcedMotion = currentMotion;
-                    forcedMotion(1:3) = finalWP;
-                    move(platform, forcedMotion);
-                    fprintf('   Moved forcibly to final => done.\n');
-                    path = [];
-                    return;
-                end
+            catch e
+                fprintf('Error in movement execution: %s\n', e.message);
             end
         end
+        
         function needsReplan = needsReplanning(obj, currentPos, path)
             if isempty(path)
                 needsReplan = true;
@@ -1337,31 +1071,31 @@ classdef centralController_RRT < handle
             try
                 collisionDetected = false;
                 
-                % Create a temporary copy of the vehicle assignments for logging
                 tempAssignments = containers.Map('KeyType', 'char', 'ValueType', 'double');
                 fprintf('Debug: Initial vehicle assignments state:\n');
                 if ~isempty(obj.vehicleAssignments) && obj.vehicleAssignments.Count > 0
-                    keysList = obj.vehicleAssignments.keys;
-                    for k = 1:length(keysList)
-                        fprintf('Debug: %s assigned to survivor %d\n', keysList{k}, obj.vehicleAssignments(keysList{k}));
+                    keys = obj.vehicleAssignments.keys;
+                    for k = 1:length(keys)
+                        fprintf('Debug: %s assigned to survivor %d\n', ...
+                            keys{k}, obj.vehicleAssignments(keys{k}));
                     end
                 else
                     fprintf('Debug: No current assignments\n');
                 end
                 
                 if ~isempty(obj.vehicleAssignments) && obj.vehicleAssignments.Count > 0
-                    keysList = obj.vehicleAssignments.keys;
+                    keys = obj.vehicleAssignments.keys;
                     fprintf('Debug: Copying assignments to temporary map...\n');
-                    for k = 1:length(keysList)
-                        key = char(keysList{k});
+                    for k = 1:length(keys)
+                        key = char(keys{k});
                         value = double(obj.vehicleAssignments(key));
                         fprintf('Debug: Copying assignment %s -> %d (types: %s -> %s)\n', ...
                             key, value, class(key), class(value));
                         tempAssignments(key) = value;
                     end
                 end
-                
-                % Check for collisions between aerial and ground vehicles
+        
+                % Aerial vs. Ground collisions
                 for i = 1:obj.numAerialVehicles
                     if ~isempty(obj.aerialPlatforms{i})
                         currentMotion = obj.aerialPlatforms{i}.read();
@@ -1373,7 +1107,8 @@ classdef centralController_RRT < handle
                             fprintf('zeroed position [0, 0, 0]\n');
                             continue;
                         else
-                            fprintf('[%.2f, %.2f, %.2f]\n', currentMotion(1), currentMotion(2), currentMotion(3));
+                            fprintf('[%.2f, %.2f, %.2f]\n', ...
+                                currentMotion(1), currentMotion(2), currentMotion(3));
                         end
                         
                         pos1 = currentMotion(1:3);
@@ -1389,19 +1124,22 @@ classdef centralController_RRT < handle
                                     fprintf('zeroed position [0, 0, 0]\n');
                                     continue;
                                 else
-                                    fprintf('[%.2f, %.2f, %.2f]\n', otherMotion(1), otherMotion(2), otherMotion(3));
+                                    fprintf('[%.2f, %.2f, %.2f]\n', ...
+                                        otherMotion(1), otherMotion(2), otherMotion(3));
                                 end
                                 
                                 pos2 = otherMotion(1:3);
                                 dist = norm(pos1(1:2) - pos2(1:2));
-                                fprintf('Debug: Distance between UAV%d and Ground%d: %.2f\n', i, j, dist);
+                                fprintf('Debug: Distance between UAV%d and Ground%d: %.2f\n', ...
+                                    i, j, dist);
                                 
                                 if dist < obj.SAFE_DISTANCE
                                     collisionDetected = true;
-                                    aerialID = sprintf('UAV%d', i);
-                                    groundID = sprintf('Ground%d', j);
+                                    aerialID = char(sprintf('UAV%d', i));
+                                    groundID = char(sprintf('Ground%d', j));
                                     
-                                    fprintf('Debug: Collision detected between %s and %s\n', aerialID, groundID);
+                                    fprintf('Debug: Collision detected between %s and %s\n', ...
+                                        aerialID, groundID);
                                     fprintf('Debug: Vehicle positions - Aerial: [%.2f, %.2f, %.2f], Ground: [%.2f, %.2f, %.2f]\n', ...
                                         pos1(1), pos1(2), pos1(3), pos2(1), pos2(2), pos2(3));
                                     
@@ -1409,33 +1147,13 @@ classdef centralController_RRT < handle
                                     if tempAssignments.Count > 0
                                         tempKeys = tempAssignments.keys;
                                         for k2 = 1:length(tempKeys)
-                                            fprintf('Debug: %s -> %d\n', tempKeys{k2}, double(tempAssignments(tempKeys{k2})));
+                                            fprintf('Debug: %s -> %d\n', ...
+                                                char(tempKeys{k2}), double(tempAssignments(tempKeys{k2})));
                                         end
                                     end
                                     
-                                    % Existing adjustment call
                                     obj.adjustAerialHeight(i, pos1, currentMotion(4:6));
                                     fprintf('Debug: Adjusted height for UAV%d\n', i);
-                                    
-                                    %%%% Robust Collision Handling Improvement %%%%
-                                    fprintf('Forcing path regeneration due to collision proximity for UAV%d\n', i);
-                                    vehicleID = sprintf('UAV%d', i);
-                                    if obj.vehicleAssignments.isKey(vehicleID)
-                                        survivorID = obj.vehicleAssignments(vehicleID);
-                                        survivor = obj.findSurvivorByID(survivorID);
-                                        if ~isempty(survivor)
-                                            currentPos = obj.aerialPlatforms{i}.read();
-                                            targetPos = survivor.Position;
-                                            [success, newPath] = obj.planPath(currentPos(1:3), targetPos, true);
-                                            if success
-                                                obj.vehiclePaths{i} = newPath;
-                                                fprintf('New path generated for UAV%d after collision handling\n', i);
-                                            else
-                                                fprintf('Path regeneration failed for UAV%d\n', i);
-                                            end
-                                        end
-                                    end
-                                    %%%% End Robust Collision Handling %%%%
                                     
                                     if tempAssignments.Count > 0
                                         fprintf('Debug: Restoring assignments after collision handling\n');
@@ -1520,25 +1238,16 @@ classdef centralController_RRT < handle
         end
         
         function [assignmentsMade, assignedSurvivorIDs] = assignSurvivorsToVehicles(obj)
-            % Initialize outputs
             assignmentsMade = 0;
             assignedSurvivorIDs = [];
         
-            % Ensure vehicleAssignments map is not empty
             if isempty(obj.vehicleAssignments)
                 obj.vehicleAssignments = containers.Map('KeyType', 'char', 'ValueType', 'double');
             end
         
-            % Debug statement: "We are about to check survivors"
-            if obj.debugEnabled
-                fprintf('\n[assignSurvivorsToVehicles DEBUG] Checking unvisited survivors...\n');
-            end
-        
-            % Grab unvisited (undetected) survivors
             unvisitedSurvivors = obj.survivorManager.getUnvisitedSurvivors();
-        
             fprintf('\nChecking survivor assignments...\n');
-            obj.survivorManager.showSurvivorStatus();  % Existing code
+            obj.survivorManager.showSurvivorStatus();
         
             if isempty(unvisitedSurvivors)
                 fprintf('No undetected survivors to assign.\n');
@@ -1547,28 +1256,24 @@ classdef centralController_RRT < handle
         
             fprintf('Found %d undetected survivors\n', length(unvisitedSurvivors));
         
-            %% =========================
-            %   ASSIGN AERIAL VEHICLES
-            %% =========================
+            highPriorityCount = 0;
+            for s = 1:length(unvisitedSurvivors)
+                if unvisitedSurvivors(s).Priority == 1
+                    highPriorityCount = highPriorityCount + 1;
+                end
+            end
+            fprintf('Found %d undetected survivors (%d high priority)\n', ...
+                length(unvisitedSurvivors), highPriorityCount);
+        
+            %% Assign Aerial Vehicles
             for i = 1:obj.numAerialVehicles
                 if ~isempty(obj.aerialPlatforms{i})
                     vehicleID = sprintf('UAV%d', i);
-        
-                    % If this UAV is already assigned, see if it has a valid path
+
                     if obj.vehicleAssignments.isKey(vehicleID)
-                        % It's assigned. Check if it has a path
-                        if ~isempty(obj.vehiclePaths{i})
-                            % It's busy → skip
-                            continue;
-                        else
-                            % It's assigned but path is empty → remove
-                            fprintf('UAV%d was assigned but path is empty => removing assignment.\n', i);
-                            obj.vehicleAssignments.remove(vehicleID);
-                            % do NOT continue => we want to pick new assignment
-                        end
+                        continue;
                     end
-        
-                    % Determine current UAV position
+
                     currentMotion = obj.aerialPlatforms{i}.read();
                     if isempty(currentMotion) || all(currentMotion(1:3) == 0)
                         spacing = 30;  
@@ -1576,41 +1281,39 @@ classdef centralController_RRT < handle
                         row = ceil(i / gridSize);
                         col = mod(i-1, gridSize) + 1;
                         currentPos = [
-                            (col-1)*spacing + spacing/2, ...
-                            (row-1)*spacing + spacing/2, ...
+                            (col-1) * spacing + spacing/2, ...
+                            (row-1) * spacing + spacing/2, ...
                             obj.CRUISE_HEIGHT
                         ];
                         fprintf('Using initial position for UAV%d: [%.1f, %.1f, %.1f]\n', ...
                             i, currentPos(1), currentPos(2), currentPos(3));
                     else
                         currentPos = currentMotion(1:3);
-                        fprintf('Current position for UAV%d: [%.1f, %.1f, %.1f]\n',...
+                        fprintf('Current position for UAV%d: [%.1f, %.1f, %.1f]\n', ...
                             i, currentPos(1), currentPos(2), currentPos(3));
                     end
         
-                    survivorAssigned = false;  % track if we found a high-priority survivor
-        
-                    %% 1) High-Priority Survivors First
+                    survivorAssigned = false;
                     for sIndex = 1:length(unvisitedSurvivors)
                         if unvisitedSurvivors(sIndex).Priority == 1 && ...
                            strcmp(unvisitedSurvivors(sIndex).Status, 'UNDETECTED')
-        
+
                             goalPos = unvisitedSurvivors(sIndex).Position;
-                            fprintf('High-priority survivor %d candidate: [%.2f, %.2f, %.2f]\n',...
-                                unvisitedSurvivors(sIndex).ID, goalPos(1), goalPos(2), goalPos(3));
-        
-                            if obj.debugEnabled
-                                fprintf('[assignSurvivors DEBUG] Attempting plan for UAV%d → Surv%d\n',...
-                                    i, unvisitedSurvivors(sIndex).ID);
-                            end
-        
+                            
+                            %%% NEW DEBUG CODE %%%
+                            fprintf('Survivor actual coordinate: [%.2f, %.2f, %.2f]\n', ...
+                                unvisitedSurvivors(sIndex).Position(1), ...
+                                unvisitedSurvivors(sIndex).Position(2), ...
+                                unvisitedSurvivors(sIndex).Position(3));
+                            fprintf('Goal position: [%.2f, %.2f, %.2f]\n', ...
+                                goalPos(1), goalPos(2), goalPos(3));
+                            
                             [success, path] = obj.planPath(currentPos, goalPos, true);
         
                             if success
-                                % Store path
                                 obj.vehiclePaths{i} = path;
                                 unvisitedSurvivors(sIndex).Status = 'IN_PROGRESS';
-        
+
                                 if ~obj.vehicleAssignments.isKey(vehicleID)
                                     obj.vehicleAssignments(vehicleID) = double(unvisitedSurvivors(sIndex).ID);
                                     unvisitedSurvivors(sIndex).AssignedVehicle = vehicleID;
@@ -1619,23 +1322,17 @@ classdef centralController_RRT < handle
                                 assignmentsMade = assignmentsMade + 1;
                                 assignedSurvivorIDs = [assignedSurvivorIDs, unvisitedSurvivors(sIndex).ID];
         
-                                fprintf('Assigned HIGH-PRIORITY survivor %d to UAV%d (distance: %.1fm)\n',...
+                                fprintf('Assigned HIGH-PRIORITY survivor %d to UAV%d (distance: %.1fm)\n', ...
                                     unvisitedSurvivors(sIndex).ID, i, norm(goalPos - currentPos));
                                 survivorAssigned = true;
-                                break;  % done with high-priority loop
+                                break;
                             else
-                                fprintf('Failed to plan path to high-priority survivor %d\n',...
+                                fprintf('Failed to plan path to high-priority survivor %d\n', ...
                                     unvisitedSurvivors(sIndex).ID);
-        
-                                if obj.debugEnabled
-                                    fprintf('[assignSurvivors DEBUG] Plan failed for UAV%d on high-priority Surv%d\n',...
-                                        i, unvisitedSurvivors(sIndex).ID);
-                                end
                             end
                         end
                     end
-        
-                    %% 2) Nearest Survivor if no high-priority was assigned
+
                     if ~survivorAssigned
                         minDist = inf;
                         nearestSurvivor = [];
@@ -1654,83 +1351,67 @@ classdef centralController_RRT < handle
         
                         if ~isempty(nearestSurvivor)
                             goalPos = nearestSurvivor.Position;
-                            fprintf('Assigning nearest survivor %d to UAV%d (distance: %.1fm)\n',...
-                                nearestSurvivor.ID, i, minDist);
-        
-                            if obj.debugEnabled
-                                fprintf('[assignSurvivors DEBUG] Attempting plan for UAV%d → nearest Surv%d\n',...
-                                    i, nearestSurvivor.ID);
-                            end
-        
+                            
+                            %%% NEW DEBUG CODE %%%
+                            fprintf('Survivor actual coordinate: [%.2f, %.2f, %.2f]\n', ...
+                                nearestSurvivor.Position(1), ...
+                                nearestSurvivor.Position(2), ...
+                                nearestSurvivor.Position(3));
+                            fprintf('Goal position: [%.2f, %.2f, %.2f]\n', ...
+                                goalPos(1), goalPos(2), goalPos(3));
+                            
                             [success, path] = obj.planPath(currentPos, goalPos, true);
         
                             if success
-                                % FIX BUG: was s{i} = path;  -> should be obj.vehiclePaths{i} = path;
                                 obj.vehiclePaths{i} = path;
                                 unvisitedSurvivors(nearestIdx).Status = 'IN_PROGRESS';
-        
+                                
                                 if ~obj.vehicleAssignments.isKey(vehicleID)
                                     obj.vehicleAssignments(vehicleID) = double(nearestSurvivor.ID);
                                     unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
+                                    assignmentsMade = assignmentsMade + 1;
+                                    assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
+                                    fprintf('Assigned survivor %d to UAV%d (distance: %.1fm)\n', ...
+                                        nearestSurvivor.ID, i, minDist);
                                 end
-        
-                                assignmentsMade = assignmentsMade + 1;
-                                assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
-                                fprintf('Assigned survivor %d to UAV%d (distance: %.1fm)\n',...
-                                    nearestSurvivor.ID, i, minDist);
                             else
-                                fprintf('Failed to plan path to survivor %d => removing assignment.\n',...
-                                    unvisitedSurvivors(sIndex).ID);
-        
-                                if obj.debugEnabled
-                                    fprintf('[assignSurvivors DEBUG] Plan failed. Removing assignment for UAV%d.\n', i);
-                                end
-        
-                                if obj.vehicleAssignments.isKey(vehicleID)
-                                    obj.vehicleAssignments.remove(vehicleID);
-                                end
-                                continue;
+                                fprintf('Failed to plan path to survivor %d\n', nearestSurvivor.ID);
                             end
                         end
                     end
                 end
             end
         
-            %% =========================
-            %   ASSIGN GROUND VEHICLES
-            %% =========================
+            %% Assign Ground Vehicles
             for i = 1:obj.numGroundVehicles
                 idx = obj.numAerialVehicles + i;
-        
                 if ~isempty(obj.groundPlatforms{i})
                     vehicleID = sprintf('Ground%d', i);
-        
-                    % If ground vehicle is assigned, skip
+
                     if obj.vehicleAssignments.isKey(vehicleID)
                         continue;
                     end
         
-                    % Current position check
                     currentMotion = obj.groundPlatforms{i}.read();
                     if isempty(currentMotion) || all(currentMotion(1:3) == 0)
                         spacing = obj.environment.dimensions(1) / (obj.numGroundVehicles + 1);
                         currentPos = [
-                            i*spacing, ...
+                            i * spacing, ...
                             10, ...
                             0
                         ];
-                        fprintf('Using initial position for Ground%d: [%.1f, %.1f, %.1f]\n',...
+                        fprintf('Using initial position for Ground%d: [%.1f, %.1f, %.1f]\n', ...
                             i, currentPos(1), currentPos(2), currentPos(3));
                     else
                         currentPos = currentMotion(1:3);
-                        fprintf('Current position for Ground%d: [%.1f, %.1f, %.1f]\n',...
+                        fprintf('Current position for Ground%d: [%.1f, %.1f, %.1f]\n', ...
                             i, currentPos(1), currentPos(2), currentPos(3));
                     end
         
-                    % Find the nearest unvisited
                     minDist = inf;
                     nearestSurvivor = [];
                     nearestIdx = 0;
+        
                     for sIndex = 1:length(unvisitedSurvivors)
                         if strcmp(unvisitedSurvivors(sIndex).Status, 'UNDETECTED')
                             dist = norm(unvisitedSurvivors(sIndex).Position(1:2) - currentPos(1:2));
@@ -1745,15 +1426,15 @@ classdef centralController_RRT < handle
                     if ~isempty(nearestSurvivor)
                         goalPos = nearestSurvivor.Position;
                         goalPos(3) = 0;
-        
-                        fprintf('Assigning survivor %d to Ground%d (distance: %.1fm)\n',...
-                            nearestSurvivor.ID, i, minDist);
-        
-                        if obj.debugEnabled
-                            fprintf('[assignSurvivors DEBUG] Attempting plan for Ground%d → Surv%d\n',...
-                                i, nearestSurvivor.ID);
-                        end
-        
+                        
+                        %%% NEW DEBUG CODE %%%
+                        fprintf('Survivor actual coordinate: [%.2f, %.2f, %.2f]\n', ...
+                            nearestSurvivor.Position(1), ...
+                            nearestSurvivor.Position(2), ...
+                            nearestSurvivor.Position(3));
+                        fprintf('Goal position: [%.2f, %.2f, %.2f]\n', ...
+                            goalPos(1), goalPos(2), goalPos(3));
+                        
                         [success, path] = obj.planPath(currentPos, goalPos, false);
         
                         if success
@@ -1765,34 +1446,24 @@ classdef centralController_RRT < handle
                                 unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
                                 assignmentsMade = assignmentsMade + 1;
                                 assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
-                                fprintf('Assigned survivor %d to ground vehicle %d (distance: %.1fm)\n',...
+                                fprintf('Assigned survivor %d to ground vehicle %d (distance: %.1fm)\n', ...
                                     nearestSurvivor.ID, i, minDist);
                             end
                         else
-                            fprintf('Failed to plan path to survivor %d => removing assignment.\n',...
-                                nearestSurvivor.ID);
-        
-                            if obj.debugEnabled
-                                fprintf('[assignSurvivors DEBUG] Plan failed for Ground%d => removing assignment.\n', i);
-                            end
-        
-                            if obj.vehicleAssignments.isKey(vehicleID)
-                                obj.vehicleAssignments.remove(vehicleID);
-                            end
-                            continue;
+                            fprintf('Failed to plan path to survivor %d\n', nearestSurvivor.ID);
                         end
                     end
                 end
             end
         
-            % Summary print
             if assignmentsMade > 0
-                fprintf('Assignment Summary: Made %d new assignments, Survivors: %s\n',...
+                fprintf('Assignment Summary: Made %d new assignments, Survivors: %s\n', ...
                     assignmentsMade, mat2str(assignedSurvivorIDs));
             else
                 fprintf('No new assignments made\n');
             end
-        end        
+        end
+        
         function updateVehiclePositions(obj)
             for i = 1:obj.numAerialVehicles
                 if ~isempty(obj.aerialPlatforms{i}) && ~isempty(obj.vehiclePaths{i})
@@ -1814,29 +1485,6 @@ classdef centralController_RRT < handle
                     end
                 end
             end
-        end
-
-        function densePath = interpolatePath(obj, rawPath, stepSize)
-            % Insert intermediate waypoints every 'stepSize' meters
-            if size(rawPath,1) < 2
-                densePath = rawPath;
-                return;
-            end
-            densePath = [];
-            for k = 1:size(rawPath,1)-1
-                p1 = rawPath(k,1:3);
-                p2 = rawPath(k+1,1:3);
-                segDist = norm(p2 - p1);
-                nSteps = max(1, ceil(segDist / stepSize));
-                for s = 0:nSteps-1
-                    t = s / nSteps;
-                    xyz = p1 + t*(p2 - p1);
-                    % preserve orientation from rawPath(k,4:7) if needed:
-                    densePath = [densePath; xyz, rawPath(k,4:7)];
-                end
-            end
-            % add the final endpoint
-            densePath = [densePath; rawPath(end,:)];
         end
     end
 end

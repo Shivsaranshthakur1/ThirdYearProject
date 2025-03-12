@@ -2,16 +2,16 @@
 classdef SurvivorManager < handle
     properties
         Survivors       % Array of Survivor objects
-        Environment     % Reference to environment
-        Scenario        % Reference to UAV scenario
+        Environment    % Reference to environment
+        Scenario      % Reference to UAV scenario
     end
     
     properties (Constant)
         SURVIVOR_RADIUS = 0.5    % Radius for survivor visualization (meters)
         SURVIVOR_HEIGHT = 1.8    % Height for survivor visualization (meters)
-        MIN_SPACING = 5          % Minimum spacing between survivors (meters)
+        MIN_SPACING = 5         % Minimum spacing between survivors (meters)
         MAX_PLACEMENT_ATTEMPTS = 100  % Maximum attempts to place a survivor
-        MIN_BUILDING_DISTANCE = 3     % Minimum distance from buildings (meters)
+        MIN_BUILDING_DISTANCE = 3    % Minimum distance from buildings (meters)
     end
     
     methods
@@ -89,15 +89,32 @@ classdef SurvivorManager < handle
             end
         end
         
-        function priority = generatePriority(~)
-            % Generate weighted random priority, but skip high priority
-            r = rand();
-            if r < 0.5
-                priority = 2;  % Medium
-            else
-                priority = 3;  % Low
-            end
+        %function priority = generatePriority(~)
+            % Generate weighted random priority
+            %r = rand();
+            %if r < 0.2
+                %priority = 1;     % 20% High priority
+            %elseif r < 0.7
+                %priority = 2;     % 50% Medium priority
+            %else
+                %priority = 3;     % 30% Low priority
+            %end
+    %end
+
+    function priority = generatePriority(~)
+        % Generate weighted random priority, but skip high priority
+        r = rand();
+        % if r < 0.2
+        %     priority = 1;     % Comment out this block to disable "1"
+        % elseif ...
+        
+        % Instead just do:
+        if r < 0.5
+            priority = 2;  % Medium
+        else
+            priority = 3;  % Low
         end
+    end
         
         function pos = generateValidPosition(obj)
             % Get environment dimensions
@@ -165,8 +182,8 @@ classdef SurvivorManager < handle
             dims = obj.Environment.dimensions;
             
             valid = pos(1) >= margin && pos(1) <= (dims(1) - margin) && ...
-                    pos(2) >= margin && pos(2) <= (dims(2) - margin) && ...
-                    pos(3) >= 0;
+                   pos(2) >= margin && pos(2) <= (dims(2) - margin) && ...
+                   pos(3) >= 0;
         end
         
         function near = isNearBuilding(obj, pos, building)
@@ -195,15 +212,15 @@ classdef SurvivorManager < handle
                 % Extract position
                 position = survivor.Position;
                 
-                %%%% MODIFICATION: Custom Survivor Mesh %%%%
-                % Instead of using a cylinder, load a custom survivor model.
-                survivorScale = 0.5;        % Adjust the scale as needed for your model
-                survivorRotation = eye(3);    % No rotation by default
-                hSurvivor = loadCustomMesh('drawings/survivor.obj', survivorScale, position, survivorRotation);
-                % Add the loaded mesh to the scenario. Depending on how your scenario is set up,
-                % you can call addMesh with the patch handle. Here we assume addMesh accepts the patch:
-                addMesh(obj.Scenario, hSurvivor);
-                %%%% End of Modification %%%%
+                % Create cylinder geometry in correct format
+                % {[centerx centery radius], [zmin zmax]}
+                geometry = {
+                    [position(1) position(2) obj.SURVIVOR_RADIUS], ... % [x y radius]
+                    [0 obj.SURVIVOR_HEIGHT]                           % [zmin zmax]
+                };
+                
+                % Add cylinder mesh for survivor
+                addMesh(obj.Scenario, 'cylinder', geometry, survivor.Color);
                 
             catch e
                 warning('Failed to add survivor mesh: %s', e.message);

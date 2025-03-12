@@ -55,37 +55,17 @@ classdef searchRescueEnvironment < handle
         end
         
         function createGround(obj)
-            % Create ground as a textured surface if a texture image exists,
-            % otherwise, fall back to a simple polygon.
-            try
-                % Attempt to load a ground texture from the "drawings" folder.
-                texture = imread('drawings/groundTexture.jpg');
-            catch
-                texture = [];
-            end
+            groundVertices = [
+                0                 0;
+                obj.dimensions(1) 0;
+                obj.dimensions(1) obj.dimensions(2);
+                0                 obj.dimensions(2)
+            ];
             
-            % Create grid for ground surface
-            [X, Y] = meshgrid(0:obj.occupancyMap.Resolution:obj.dimensions(1), ...
-                              0:obj.occupancyMap.Resolution:obj.dimensions(2));
-            Z = zeros(size(X));
-            
-            % Use gca to get current axes (fixing the error you encountered)
-            ax = gca;
-            if ~isempty(texture)
-                % Display a textured surface for the ground.
-                % Adjust texture mapping if necessary.
-                surf(ax, X, Y, Z, 'CData', texture, ...
-                     'FaceColor', 'texturemap', 'EdgeColor', 'none');
-            else
-                % Fall back to a colored polygon.
-                groundVertices = [
-                    0, 0;
-                    obj.dimensions(1), 0;
-                    obj.dimensions(1), obj.dimensions(2);
-                    0, obj.dimensions(2)
-                ];
-                addMesh(obj.scenario, 'Polygon', {groundVertices, [-1 0]}, [0.7 0.7 0.7]);
-            end
+            % Add ground mesh
+            addMesh(obj.scenario, 'Polygon', ...
+                    {groundVertices, [-1 0]}, ...
+                    [0.7 0.7 0.7]); % grey color
         end
         
         function createBuildings(obj)
@@ -108,18 +88,16 @@ classdef searchRescueEnvironment < handle
             
             for i = 1:size(buildingConfigs, 1)
                 config = buildingConfigs(i, :);
-                % Instead of a basic polygon mesh, load a custom building model.
-                buildingPos = [config(1), config(2), 0];
-                scaleFactor = 1.0;       % Adjust as needed for your model
-                rotationMatrix = eye(3); % No rotation by default
-                % Load the custom building mesh from your "drawings" folder
-                hBuilding = loadCustomMesh('drawings/building.obj', scaleFactor, buildingPos, rotationMatrix);
+                vertices = obj.createBuildingVertices(config);
                 
-                % Save building information for occupancy mapping and reference
-                obj.buildingList(i).position = buildingPos;
+                obj.buildingList(i).position = [config(1), config(2), 0];
                 obj.buildingList(i).dimensions = [config(3), config(4), config(5)];
                 
-                % Add building to occupancy map as before.
+                % Add building polygon mesh
+                addMesh(obj.scenario, 'Polygon', ...
+                        {vertices, [0 config(5)]}, ...
+                        [0.8 0.8 0.8]);
+                
                 obj.addBuildingToOccupancyMap(obj.buildingList(i));
             end
         end
@@ -192,49 +170,47 @@ classdef searchRescueEnvironment < handle
                 ax = gca;
                 hold(ax, 'on');
                 
-                % Display the occupancy map
                 show(obj.occupancyMap, 'Parent', ax);
                 
-                % --- Enhancement: Set up realistic lighting and camera settings ---
-                camproj('perspective');
-                view(45, 30);
-                axis equal;
-                camlight('headlight');
-                lighting gouraud;
-                material shiny;
-                
-                % Draw a boundary around the search area
-                boundaryX = [0, obj.dimensions(1), obj.dimensions(1), 0, 0];
-                boundaryY = [0, 0, obj.dimensions(2), obj.dimensions(2), 0];
-                boundaryZ = zeros(size(boundaryX));
-                plot3(ax, boundaryX, boundaryY, boundaryZ, 'k-', 'LineWidth', 2);
-                % ---------------------------------------------------------------------
-                
-                % Optionally, display building bounding boxes
                 for i = 1:length(obj.buildingList)
                     building = obj.buildingList(i);
-                    [X, Y, Z] = obj.createBuildingBox(building.position, building.dimensions);
+                    pos = building.position;
+                    dims = building.dimensions;
+                    
+                    [X,Y,Z] = obj.createBuildingBox(pos, dims);
+                    
                     h1 = fill3(ax, X(:,[1 2 3 4 1])', Y(:,[1 2 3 4 1])', Z(:,[1 2 3 4 1])', ...
                         [0.8 0.8 0.8], 'EdgeColor', [0.5 0.5 0.5]);
-                    set(h1, 'Tag', 'building');
+                    h2 = fill3(ax, X(:,[5 6 7 8 5])', Y(:,[5 6 7 8 5])', Z(:,[5 6 7 8 5])', ...
+                        [0.8 0.8 0.8], 'EdgeColor', [0.5 0.5 0.5]);
+                    h3 = fill3(ax, X(:,[1 5 8 4 1])', Y(:,[1 5 8 4 1])', Z(:,[1 5 8 4 1])', ...
+                        [0.7 0.7 0.7], 'EdgeColor', [0.5 0.5 0.5]);
+                    h4 = fill3(ax, X(:,[2 6 7 3 2])', Y(:,[2 6 7 3 2])', Z(:,[2 6 7 3 2])', ...
+                        [0.7 0.7 0.7], 'EdgeColor', [0.5 0.5 0.5]);
+                    h5 = fill3(ax, X(:,[4 8 7 3 4])', Y(:,[4 8 7 3 4 1])', Z(:,[4 8 7 3 4])', ...
+                        [0.9 0.9 0.9], 'EdgeColor', [0.5 0.5 0.5]);
+                    h6 = fill3(ax, X(:,[1 5 6 2 1])', Y(:,[1 5 6 2 1])', Z(:,[1 5 6 2 1])', ...
+                        [0.9 0.9 0.9], 'EdgeColor', [0.5 0.5 0.5]);
+                    
+                    set([h1 h2 h3 h4 h5 h6], 'Tag', 'building');
                 end
                 
-                % Display obstacles
                 for i = 1:size(obj.obstacles.config, 1)
                     config = obj.obstacles.config(i,:);
-                    [X, Y, Z] = cylinder(config(3), 20);
+                    [X,Y,Z] = cylinder(config(3), 20);
                     X = X * config(3) + config(1);
                     Y = Y * config(3) + config(2);
                     Z = Z * config(4);
-                    surf(ax, X, Y, Z, 'FaceColor', [0.6 0.6 0.6], 'EdgeColor', 'none', 'Tag', 'building');
+                    surf(ax, X, Y, Z, 'FaceColor', [0.6 0.6 0.6], ...
+                        'EdgeColor', 'none', 'Tag', 'building');
                 end
                 
             catch e
                 fprintf('Error in environment show: %s\n', getReport(e));
             end
         end
-        
-        function [X, Y, Z] = createBuildingBox(obj, pos, dims)
+
+        function [X,Y,Z] = createBuildingBox(obj, pos, dims)
             x = pos(1) + [0 dims(1) dims(1) 0 0 dims(1) dims(1) 0];
             y = pos(2) + [0 0 dims(2) dims(2) 0 0 dims(2) dims(2)];
             z = pos(3) + [0 0 0 0 dims(3) dims(3) dims(3) dims(3)];

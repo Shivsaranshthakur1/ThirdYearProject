@@ -4,9 +4,10 @@ classdef VehicleFactory
             try
                 % Input validation
                 if nargin < 5
-                    error('VehicleFactory:InvalidInput', 'Not enough input arguments for aerial vehicle creation');
+                    error('VehicleFactory:InvalidInput', ...
+                        'Not enough input arguments for aerial vehicle creation');
                 end
-        
+                
                 % Position validation
                 initialPos = reshape(position, 1, 3);
                 if any(isnan(initialPos)) || all(initialPos == 0)
@@ -14,7 +15,7 @@ classdef VehicleFactory
                         'Invalid initial position for aerial vehicle: [%.1f, %.1f, %.1f]', ...
                         initialPos(1), initialPos(2), initialPos(3));
                 end
-        
+                
                 % Environment bounds validation (assuming standard dimensions)
                 if initialPos(1) < 0 || initialPos(1) > 300 || ...
                    initialPos(2) < 0 || initialPos(2) > 300 || ...
@@ -23,46 +24,37 @@ classdef VehicleFactory
                         'Initial position out of valid bounds: [%.1f, %.1f, %.1f]', ...
                         initialPos(1), initialPos(2), initialPos(3));
                 end
-        
+                
                 fprintf('Creating aerial vehicle %s at position [%.1f, %.1f, %.1f]\n', ...
                     name, initialPos(1), initialPos(2), initialPos(3));
-        
+                
                 fullName = sprintf('%s_aerial', name);
-                initialMotion = [ ...
-                    initialPos(1:3), ...         % Position (3)
-                    speed, 0, 0, ...             % Velocity (3)
-                    0, 0, 0, ...                 % Acceleration (3)
-                    1, 0, 0, 0, ...              % Quaternion (4)
-                    0, 0, 0                     % Angular velocity (3)
+                initialMotion = [
+                    initialPos(1:3), ...  % Position (3)
+                    speed, 0, 0, ...      % Velocity - speed in x direction (3)
+                    0, 0, 0, ...          % Acceleration (3)
+                    1, 0, 0, 0, ...       % Quaternion (4)
+                    0, 0, 0               % Angular velocity (3)
                 ];
-        
+                
                 platform = uavPlatform(fullName, scenario, 'ReferenceFrame', 'ENU');
                 move(platform, initialMotion);
-        
+                
                 %%% DEBUG CODE %%%
                 currentMotionCheck = read(platform);
-                fprintf('DEBUG: After move(), read() for %s => [%.2f, %.2f, %.2f]\n', ...
+                fprintf('DEBUG: After move(), read() for %s => [%.2f, %.2f, %.2f]\n',...
                     fullName, currentMotionCheck(1), currentMotionCheck(2), currentMotionCheck(3));
-                fprintf('DEBUG: Velocity => [%.2f, %.2f, %.2f]\n', ...
+                fprintf('DEBUG: Velocity => [%.2f, %.2f, %.2f]\n',...
                     currentMotionCheck(4), currentMotionCheck(5), currentMotionCheck(6));
-        
-                %%%%% Improved Visualization: Load custom drone mesh
-                droneScale = 0.5;       % Adjust this scale as needed for your model
-                droneRotation = eye(3);   % No rotation; modify if necessary
-        
-               try
-                    geom = loadCustomMesh('drawings/aerial.obj', droneScale, initialPos, droneRotation);
-                    
-                    % Update the platform visualization using the custom geometry.
-                    updateMesh(platform, 'custom', {geom.vertices, geom.faces}, color, [0 0 0], eul2quat([0 0 0]));
-                catch meshErr
-                    warning('Could not load custom aerial mesh. Using default mesh instead: %s', meshErr.message);
-                    % Use a simple default mesh instead
-                    updateMesh(platform, 'cylinder', {[0 0 1], [0 3]}, color);
-                end
-        
+                
+                % Add quadrotor mesh
+                meshSize = 8; % Make UAV larger and more visible
+                updateMesh(platform, 'quadrotor', {meshSize}, color, ...
+                    [0 0 0], ...
+                    eul2quat([0 0 pi]));
+                
                 fprintf('Successfully created aerial vehicle %s\n', name);
-        
+                
             catch e
                 fprintf('Error creating aerial vehicle %s: %s\n', name, e.message);
                 fprintf('Stack trace:\n');
@@ -71,24 +63,26 @@ classdef VehicleFactory
                 end
                 rethrow(e);
             end
-        end        
+        end
+        
         function platform = createGroundVehicle(scenario, name, position, color, speed)
             try
                 % Input validation
                 if nargin < 5
-                    error('VehicleFactory:InvalidInput', 'Not enough input arguments for ground vehicle creation');
+                    error('VehicleFactory:InvalidInput', ...
+                        'Not enough input arguments for ground vehicle creation');
                 end
-        
+                
                 % Position validation
                 initialPos = reshape(position, 1, 3);
                 initialPos(3) = 0; % Ensure ground vehicle is at z=0
-        
+                
                 if any(isnan(initialPos)) || any(abs(initialPos(1:2)) > 1e3)
                     error('VehicleFactory:InvalidPosition', ...
                         'Invalid initial position for ground vehicle: [%.1f, %.1f, %.1f]', ...
                         initialPos(1), initialPos(2), initialPos(3));
                 end
-        
+                
                 % Environment bounds validation (assuming standard dimensions)
                 if initialPos(1) < 0 || initialPos(1) > 300 || ...
                    initialPos(2) < 0 || initialPos(2) > 300
@@ -96,44 +90,34 @@ classdef VehicleFactory
                         'Initial position out of valid bounds: [%.1f, %.1f, %.1f]', ...
                         initialPos(1), initialPos(2), initialPos(3));
                 end
-        
+                
                 fullName = sprintf('%s_ground', name);
-                initialMotion = [ ...
-                    initialPos(1:3), ...         % Position (3)
-                    speed, 0, 0, ...             % Velocity (3)
-                    0, 0, 0, ...                 % Acceleration (3)
-                    1, 0, 0, 0, ...              % Quaternion (4)
-                    0, 0, 0                     % Angular velocity (3)
+                initialMotion = [
+                    initialPos(1:3), ...  % Position (3)
+                    speed, 0, 0, ...      % Velocity (3)
+                    0, 0, 0, ...          % Acceleration (3)
+                    1, 0, 0, 0, ...       % Quaternion (4)
+                    0, 0, 0               % Angular velocity (3)
                 ];
-        
+                
                 platform = uavPlatform(fullName, scenario, 'ReferenceFrame', 'ENU');
                 move(platform, initialMotion);
-        
+                
                 %%% DEBUG CODE %%%
                 currentMotionCheck = read(platform);
-                fprintf('DEBUG: After move(), read() for %s => [%.2f, %.2f, %.2f]\n', ...
+                fprintf('DEBUG: After move(), read() for %s => [%.2f, %.2f, %.2f]\n',...
                     fullName, currentMotionCheck(1), currentMotionCheck(2), currentMotionCheck(3));
-                fprintf('DEBUG: Velocity => [%.2f, %.2f, %.2f]\n', ...
+                fprintf('DEBUG: Velocity => [%.2f, %.2f, %.2f]\n',...
                     currentMotionCheck(4), currentMotionCheck(5), currentMotionCheck(6));
-        
-                %%%%% Improved Visualization: Load custom car (ground vehicle) mesh
-                carScale = 0.5;           % Adjust scale as needed
-                carRotation = eye(3);       % No rotation by default
-        
-                % Load the OBJ file for the ground vehicle from the "drawings" folder.
-                try
-                    geom = loadCustomMesh('drawings/ground.obj', carScale, initialPos, carRotation);
-                    
-                    % Update the platform visualization using the custom geometry.
-                    updateMesh(platform, 'custom', {geom.vertices, geom.faces}, color, [0 0 0], eul2quat([0 0 0]));
-                catch meshErr
-                    warning('Could not load custom ground mesh. Using default mesh instead: %s', meshErr.message);
-                    % Use a simple default mesh instead
-                    updateMesh(platform, 'cuboid', {[3 2 1]}, color);
-                end
-        
+                
+                % Add larger cuboid mesh for better visibility
+                vehicleSize = [4 3 2]; % [length width height]
+                updateMesh(platform, 'cuboid', {vehicleSize}, color, ...
+                    [0 0 vehicleSize(3)/2], ...
+                    eul2quat([0 0 0]));
+                
                 fprintf('Successfully created ground vehicle %s\n', name);
-        
+                
             catch e
                 fprintf('Error creating ground vehicle %s: %s\n', name, e.message);
                 fprintf('Stack trace:\n');
@@ -144,9 +128,8 @@ classdef VehicleFactory
             end
         end
         
-                  
         function updateVehiclePosition(platform, newPosition)
-                    try
+            try
                 if isempty(platform) || ~isa(platform, 'uavPlatform')
                     error('VehicleFactory:InvalidPlatform', 'Invalid platform object');
                 end
