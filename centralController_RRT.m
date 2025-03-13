@@ -64,7 +64,8 @@ classdef centralController_RRT < handle
             
             % Initialize survivor manager and generate survivors
             obj.survivorManager = SurvivorManager(environment);
-            numSurvivors = randi([5, 10]);
+            % numSurvivors = randi([5, 10]); 
+            numSurvivors = 2;
             obj.survivorManager.generateSurvivors(numSurvivors);
             % Add debug output
             obj.survivorManager.showSurvivorStatus();
@@ -244,6 +245,9 @@ classdef centralController_RRT < handle
                     (row-1) * spacing + spacing/2,...
                     obj.CRUISE_HEIGHT
                 ];
+                 % Enforce a minimum altitude of 10 m
+                
+
                 
                 name = sprintf('UAV%d', i);
                 platform = VehicleFactory.createAerialVehicle(...
@@ -517,7 +521,7 @@ classdef centralController_RRT < handle
             % Define detection parameters
             DETECTION_RADIUS = 70;
             DETECTION_HEIGHT = 10.0;
-            HEIGHT_TOLERANCE = 5.0;
+            HEIGHT_TOLERANCE = 30;
             
             %%% Improvement 3: Hysteresis Implementation
             % Create a persistent counter map so that detection conditions must be met
@@ -553,6 +557,13 @@ classdef centralController_RRT < handle
                                 
                                 fprintf('Horizontal Distance: %.2f\n', horizontalDist);
                                 fprintf('Height Analysis: Current = %.2f, Target = %.2f\n', currentHeight, targetHeight);
+                                fprintf('   [Debug Detection] UAV pos=[%.2f, %.2f, %.2f], Surv pos=[%.2f, %.2f, %.2f]\n',...
+                                    vehiclePos(1), vehiclePos(2), vehiclePos(3), ...
+                                    survivor.Position(1), survivor.Position(2), survivor.Position(3));
+                                fprintf('   [Debug Detection] horizontalDist=%.2f, altDiff=%.2f (tol=%.2f)\n',...
+                                    horizontalDist, abs(currentHeight - targetHeight), HEIGHT_TOLERANCE);
+                                fprintf('   [Debug Detection] Survivor status=%s, visited=%d\n',...
+                                    survivor.Status, survivor.Visited);
                                 
                                 % Check detection conditions
                                 if horizontalDist < DETECTION_RADIUS && abs(currentHeight - targetHeight) < HEIGHT_TOLERANCE
@@ -569,9 +580,17 @@ classdef centralController_RRT < handle
                                         survivor.Status = 'DETECTED';
                                         survivor.Visited = true;
                                         
+                                        
                                         if obj.vehicleAssignments.isKey(vehicleID)
                                             obj.vehicleAssignments.remove(vehicleID);
                                         end
+                                    
+                                      
+                                        if strcmp(survivor.Status, 'IN_PROGRESS')
+                                            survivor.Status          = 'UNDETECTED';
+                                            survivor.AssignedVehicle = [];
+                                        end
+                                    
                                         if isfield(obj, 'vehicleInDescent') && obj.vehicleInDescent.isKey(vehicleID)
                                             obj.vehicleInDescent.remove(vehicleID);
                                         end
@@ -811,6 +830,9 @@ classdef centralController_RRT < handle
                     if obj.vehicleAssignments.isKey(vehicleID)
                         survivorID = obj.vehicleAssignments(vehicleID);
                         survivor = obj.findSurvivorByID(survivorID);
+
+                        fprintf('[Debug Assign Aerial] %s => Survivor %d (Status=%s)\n', ...
+                vehicleID, survivorID, survivor.Status);
                         
                         if ~isempty(survivor)
                             targetPos = survivor.Position;
@@ -890,6 +912,8 @@ classdef centralController_RRT < handle
                     if obj.vehicleAssignments.isKey(vehicleID)
                         survivorID = obj.vehicleAssignments(vehicleID);
                         survivor = obj.findSurvivorByID(survivorID);
+                        fprintf('[Debug Assign Ground] %s => Survivor %d (Status=%s)\n', ...
+                vehicleID, survivorID, survivor.Status);
                         
                         if ~isempty(survivor)
                             % Ground target = same (x,y), forced z=0
@@ -1390,29 +1414,35 @@ classdef centralController_RRT < handle
                 obj.vehicleAssignments = containers.Map('KeyType', 'char', 'ValueType', 'double');
             end
             
+            % We call them "unvisitedSurvivors", but note that we will also allow
+            % 'IN_PROGRESS' if they have no AssignedVehicle. 
             unvisitedSurvivors = obj.survivorManager.getUnvisitedSurvivors();
             fprintf('\nChecking survivor assignments...\n');
             obj.survivorManager.showSurvivorStatus();
             
             if isempty(unvisitedSurvivors)
-                fprintf('No undetected survivors to assign.\n');
+                fprintf('No unvisited survivors to assign.\n');
                 return;
             end
             
-            fprintf('Found %d undetected survivors\n', length(unvisitedSurvivors));
+            fprintf('Found %d unvisited survivors\n', length(unvisitedSurvivors));
             
-            %% Assign Aerial Vehicles
+            %% ===================================================
+            %  1) ASSIGN AERIAL VEHICLES
+            %% ===================================================
             for i = 1:obj.numAerialVehicles
                 if ~isempty(obj.aerialPlatforms{i})
                     vehicleID = sprintf('UAV%d', i);
                     
+                    % If this UAV is already assigned a survivor, skip
                     if obj.vehicleAssignments.isKey(vehicleID)
                         continue;
                     end
                     
+                    % Get the UAV's current position
                     currentMotion = obj.aerialPlatforms{i}.read();
                     if isempty(currentMotion) || all(currentMotion(1:3) == 0)
-                        spacing = 30;  
+                        spacing = 30;
                         gridSize = ceil(sqrt(obj.numAerialVehicles));
                         row = ceil(i / gridSize);
                         col = mod(i-1, gridSize) + 1;
@@ -1421,103 +1451,129 @@ classdef centralController_RRT < handle
                             (row-1) * spacing + spacing/2, ...
                             obj.CRUISE_HEIGHT
                         ];
-                        fprintf('Using initial position for UAV%d: [%.1f, %.1f, %.1f]\n', ...
-                            i, currentPos(1), currentPos(2), currentPos(3));
+                        fprintf('Using initial position for %s: [%.1f, %.1f, %.1f]\n', ...
+                            vehicleID, currentPos(1), currentPos(2), currentPos(3));
                     else
                         currentPos = currentMotion(1:3);
-                        fprintf('Current position for UAV%d: [%.1f, %.1f, %.1f]\n', ...
-                            i, currentPos(1), currentPos(2), currentPos(3));
+                        fprintf('Current position for %s: [%.1f, %.1f, %.1f]\n', ...
+                            vehicleID, currentPos(1), currentPos(2), currentPos(3));
                     end
                     
+                    % -------------------------------------------------------
+                    % 1A) Try to assign a HIGH-PRIORITY (priority=1) survivor 
+                    %     who is 'UNDETECTED' and unassigned.
+                    % -------------------------------------------------------
                     survivorAssigned = false;
-                    %%%% MODIFICATION START: Try to assign a high-priority survivor first.
                     for sIndex = 1:length(unvisitedSurvivors)
-                        if unvisitedSurvivors(sIndex).Priority == 1 && ...
-                           strcmp(unvisitedSurvivors(sIndex).Status, 'UNDETECTED')
-                           
-                            goalPos = unvisitedSurvivors(sIndex).Position;
-                            fprintf('High-priority survivor %d candidate: [%.2f, %.2f, %.2f]\n', ...
-                                unvisitedSurvivors(sIndex).ID, goalPos(1), goalPos(2), goalPos(3));
-                            [success, path] = obj.planPath(currentPos, goalPos, true);
+                        sObj = unvisitedSurvivors(sIndex);
+                        
+                        if sObj.Priority == 1 && strcmp(sObj.Status, 'UNDETECTED') ...
+                                && isempty(sObj.AssignedVehicle)
                             
+                            goalPos = sObj.Position;
+                            goalPos(3) = 10
+
+                            fprintf('High-priority survivor %d candidate at [%.2f, %.2f, %.2f]\n', ...
+                                    sObj.ID, goalPos(1), goalPos(2), goalPos(3));
+                            
+                            [success, path] = obj.planPath(currentPos, goalPos, true);
                             if success
-                                obj.vehiclePaths{i} = path;
-                                unvisitedSurvivors(sIndex).Status = 'IN_PROGRESS';
+                                % FIRST store the assignment
+                                obj.vehicleAssignments(vehicleID) = double(sObj.ID);
+                                sObj.AssignedVehicle = vehicleID;
                                 
-                                if ~obj.vehicleAssignments.isKey(vehicleID)
-                                    obj.vehicleAssignments(vehicleID) = double(unvisitedSurvivors(sIndex).ID);
-                                    unvisitedSurvivors(sIndex).AssignedVehicle = vehicleID;
-                                end
+                                % THEN mark them IN_PROGRESS
+                                sObj.Status = 'IN_PROGRESS';
+                                
+                                % Store the path
+                                obj.vehiclePaths{i} = path;
                                 
                                 assignmentsMade = assignmentsMade + 1;
-                                assignedSurvivorIDs = [assignedSurvivorIDs, unvisitedSurvivors(sIndex).ID];
+                                assignedSurvivorIDs = [assignedSurvivorIDs, sObj.ID];
                                 
-                                fprintf('Assigned HIGH-PRIORITY survivor %d to UAV%d (distance: %.1fm)\n', ...
-                                    unvisitedSurvivors(sIndex).ID, i, norm(goalPos - currentPos));
+                                fprintf('Assigned HIGH-PRIORITY survivor %d to %s (dist=%.1fm)\n', ...
+                                    sObj.ID, vehicleID, norm(goalPos - currentPos));
+                                
                                 survivorAssigned = true;
-                                break;
+                                break;  % Stop searching for more survivors
                             else
-                                fprintf('Failed to plan path to high-priority survivor %d\n', ...
-                                    unvisitedSurvivors(sIndex).ID);
+                                fprintf('Failed to plan path to high-priority survivor %d\n', sObj.ID);
                             end
                         end
                     end
-                    %%%% MODIFICATION END
                     
+                    % -------------------------------------------------------
+                    % 1B) If still unassigned, pick the NEAREST from survivors
+                    %     with status in {'UNDETECTED','IN_PROGRESS'} & no vehicle
+                    % -------------------------------------------------------
                     if ~survivorAssigned
-                        %%%% MODIFICATION START: Fallback to nearest survivor if no high-priority assignment was made.
                         minDist = inf;
                         nearestSurvivor = [];
                         nearestIdx = 0;
+                        
                         for sIndex = 1:length(unvisitedSurvivors)
-                            if strcmp(unvisitedSurvivors(sIndex).Status, 'UNDETECTED')
-                                dist = norm(unvisitedSurvivors(sIndex).Position - currentPos);
+                            sObj = unvisitedSurvivors(sIndex);
+                            
+                            %%% LOOK HERE %%%
+                            % We allow either UNDETECTED or IN_PROGRESS, but not if
+                            % the survivor is already assigned to some vehicle
+                            if any(strcmp(sObj.Status, {'UNDETECTED','IN_PROGRESS'})) ...
+                                    && isempty(sObj.AssignedVehicle)
+                                
+                                dist = norm(sObj.Position - currentPos);
                                 if dist < minDist
                                     minDist = dist;
-                                    nearestSurvivor = unvisitedSurvivors(sIndex);
+                                    nearestSurvivor = sObj;
                                     nearestIdx = sIndex;
                                 end
                             end
                         end
                         
+                        % If we found a nearest unassigned survivor, plan a path
                         if ~isempty(nearestSurvivor)
                             goalPos = nearestSurvivor.Position;
-                            fprintf('Assigning nearest survivor %d to UAV%d (distance: %.1fm)\n', ...
-                                nearestSurvivor.ID, i, minDist);
-                            [success, path] = obj.planPath(currentPos, goalPos, true);
+                            fprintf('Assigning nearest survivor %d to %s (distance=%.1fm)\n', ...
+                                nearestSurvivor.ID, vehicleID, minDist);
                             
+                            [success, path] = obj.planPath(currentPos, goalPos, true);
                             if success
-                                obj.vehiclePaths{i} = path;
+                                % FIRST store assignment
+                                obj.vehicleAssignments(vehicleID) = double(nearestSurvivor.ID);
+                                unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
+                                
+                                % THEN mark them IN_PROGRESS
                                 unvisitedSurvivors(nearestIdx).Status = 'IN_PROGRESS';
                                 
-                                if ~obj.vehicleAssignments.isKey(vehicleID)
-                                    obj.vehicleAssignments(vehicleID) = double(nearestSurvivor.ID);
-                                    unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
-                                end
+                                % Store path
+                                obj.vehiclePaths{i} = path;
                                 
                                 assignmentsMade = assignmentsMade + 1;
                                 assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
-                                fprintf('Assigned survivor %d to UAV%d (distance: %.1fm)\n', ...
-                                    nearestSurvivor.ID, i, minDist);
+                                
+                                fprintf('Assigned survivor %d to %s (dist=%.1fm)\n', ...
+                                    nearestSurvivor.ID, vehicleID, minDist);
                             else
                                 fprintf('Failed to plan path to survivor %d\n', nearestSurvivor.ID);
                             end
                         end
-                        %%%% MODIFICATION END
                     end
                 end
             end
             
-            %% Assign Ground Vehicles
+            %% ===================================================
+            %  2) ASSIGN GROUND VEHICLES
+            %% ===================================================
             for i = 1:obj.numGroundVehicles
-                idx = obj.numAerialVehicles + i;
+                idx = obj.numAerialVehicles + i;  % index for obj.vehiclePaths
                 if ~isempty(obj.groundPlatforms{i})
                     vehicleID = sprintf('Ground%d', i);
                     
+                    % If this ground vehicle is already assigned, skip
                     if obj.vehicleAssignments.isKey(vehicleID)
                         continue;
                     end
                     
+                    % Get ground vehicle position
                     currentMotion = obj.groundPlatforms{i}.read();
                     if isempty(currentMotion) || all(currentMotion(1:3) == 0)
                         spacing = obj.environment.dimensions(1) / (obj.numGroundVehicles + 1);
@@ -1526,23 +1582,28 @@ classdef centralController_RRT < handle
                             10, ...
                             0
                         ];
-                        fprintf('Using initial position for Ground%d: [%.1f, %.1f, %.1f]\n', ...
-                            i, currentPos(1), currentPos(2), currentPos(3));
+                        fprintf('Using initial position for %s: [%.1f, %.1f, %.1f]\n',...
+                            vehicleID, currentPos(1), currentPos(2), currentPos(3));
                     else
                         currentPos = currentMotion(1:3);
-                        fprintf('Current position for Ground%d: [%.1f, %.1f, %.1f]\n', ...
-                            i, currentPos(1), currentPos(2), currentPos(3));
+                        fprintf('Current position for %s: [%.1f, %.1f, %.1f]\n',...
+                            vehicleID, currentPos(1), currentPos(2), currentPos(3));
                     end
                     
+                    % Find the nearest unvisited survivor with status=UNDETECTED/IN_PROGRESS and no vehicle
                     minDist = inf;
                     nearestSurvivor = [];
                     nearestIdx = 0;
                     for sIndex = 1:length(unvisitedSurvivors)
-                        if strcmp(unvisitedSurvivors(sIndex).Status, 'UNDETECTED')
-                            dist = norm(unvisitedSurvivors(sIndex).Position(1:2) - currentPos(1:2));
+                        sObj = unvisitedSurvivors(sIndex);
+                        
+                        if any(strcmp(sObj.Status, {'UNDETECTED','IN_PROGRESS'})) ...
+                                && isempty(sObj.AssignedVehicle)
+                            
+                            dist = norm(sObj.Position(1:2) - currentPos(1:2));
                             if dist < minDist
                                 minDist = dist;
-                                nearestSurvivor = unvisitedSurvivors(sIndex);
+                                nearestSurvivor = sObj;
                                 nearestIdx = sIndex;
                             end
                         end
@@ -1550,24 +1611,28 @@ classdef centralController_RRT < handle
                     
                     if ~isempty(nearestSurvivor)
                         goalPos = nearestSurvivor.Position;
-                        goalPos(3) = 0;
+                        goalPos(3) = 0;  % ground vehicles only
                         
-                        fprintf('Assigning survivor %d to Ground%d (distance: %.1fm)\n', ...
-                            nearestSurvivor.ID, i, minDist);
+                        fprintf('Assigning survivor %d to %s (distance=%.1fm)\n',...
+                            nearestSurvivor.ID, vehicleID, minDist);
+                        
                         [success, path] = obj.planPath(currentPos, goalPos, false);
-                        
                         if success
-                            obj.vehiclePaths{idx} = path;
+                            % FIRST store assignment
+                            obj.vehicleAssignments(vehicleID) = double(nearestSurvivor.ID);
+                            unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
+                            
+                            % THEN mark them IN_PROGRESS
                             unvisitedSurvivors(nearestIdx).Status = 'IN_PROGRESS';
                             
-                            if ~obj.vehicleAssignments.isKey(vehicleID)
-                                obj.vehicleAssignments(vehicleID) = double(nearestSurvivor.ID);
-                                unvisitedSurvivors(nearestIdx).AssignedVehicle = vehicleID;
-                                assignmentsMade = assignmentsMade + 1;
-                                assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
-                                fprintf('Assigned survivor %d to ground vehicle %d (distance: %.1fm)\n', ...
-                                    nearestSurvivor.ID, i, minDist);
-                            end
+                            % Store path
+                            obj.vehiclePaths{idx} = path;
+                            
+                            assignmentsMade = assignmentsMade + 1;
+                            assignedSurvivorIDs = [assignedSurvivorIDs, nearestSurvivor.ID];
+                            
+                            fprintf('Assigned survivor %d to %s (distance=%.1fm)\n',...
+                                nearestSurvivor.ID, vehicleID, minDist);
                         else
                             fprintf('Failed to plan path to survivor %d\n', nearestSurvivor.ID);
                         end
@@ -1575,8 +1640,9 @@ classdef centralController_RRT < handle
                 end
             end
             
+            %% Final summary
             if assignmentsMade > 0
-                fprintf('Assignment Summary: Made %d new assignments, Survivors: %s\n', ...
+                fprintf('Assignment Summary: Made %d new assignments, Survivors: %s\n',...
                     assignmentsMade, mat2str(assignedSurvivorIDs));
             else
                 fprintf('No new assignments made\n');
